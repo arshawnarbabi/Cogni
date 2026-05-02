@@ -8,6 +8,17 @@ import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
+import { useTheme } from 'next-themes'
+import {
+  ResponsiveContainer,
+  LineChart, Line,
+  BarChart, Bar,
+  PieChart, Pie, Cell,
+  XAxis, YAxis,
+  CartesianGrid,
+  Tooltip,
+  Legend,
+} from 'recharts'
 import {
   PaperPlaneRight,
   Microphone,
@@ -46,6 +57,13 @@ type Course = { course_id: string; name: string; icon: string | null; icon_color
 type Session = { session_id: string; course_id: string; name: string | null; mode: string; created_at: string; essay_content?: string | null }
 type Mode = 'answer' | 'teach' | 'focus'
 type InlineCard = { type: 'flashcards' | 'quiz' | 'essay'; count: number; topic: string; data?: object[] }
+type InlineChart = {
+  chart_type: 'line' | 'bar' | 'pie'
+  title: string
+  data: { label: string; value: number; value2?: number }[]
+  x_label?: string
+  y_label?: string
+}
 type LocalAttachment = { name: string; type: string; data: string; preview?: string; source?: 'material' }
 type GradeResult = { score: number; rationale: string; topic: string }
 type ChatSegment =
@@ -56,6 +74,7 @@ type Message = {
   content: string
   streaming?: boolean
   inlineCards?: InlineCard[]
+  inlineChart?: InlineChart
   segments?: ChatSegment[]
   grade?: GradeResult
   attachments?: LocalAttachment[]
@@ -289,6 +308,124 @@ function GradeBlock({ grade }: { grade: GradeResult }) {
   )
 }
 
+const CHART_COLORS = ['#1D4ED8', '#F59E0B', '#22C55E', '#EF4444', '#8B5CF6', '#06B6D4']
+
+function MermaidDiagram({ code }: { code: string }) {
+  const containerRef = useRef<HTMLDivElement>(null)
+  const { resolvedTheme } = useTheme()
+
+  useEffect(() => {
+    let cancelled = false
+    const id = `mermaid-${Math.random().toString(36).slice(2, 9)}`
+    import('mermaid').then(({ default: mermaid }) => {
+      mermaid.initialize({
+        startOnLoad: false,
+        theme: resolvedTheme === 'dark' ? 'dark' : 'default',
+        fontFamily: 'var(--font-inter), sans-serif',
+      })
+      return mermaid.render(id, code)
+    }).then(({ svg }) => {
+      if (!cancelled && containerRef.current) containerRef.current.innerHTML = svg
+    }).catch(() => {
+      if (!cancelled && containerRef.current) containerRef.current.textContent = code
+    })
+    return () => { cancelled = true }
+  }, [code, resolvedTheme])
+
+  return (
+    <div
+      ref={containerRef}
+      className="my-2 overflow-x-auto rounded-xl border border-border bg-card p-4"
+    />
+  )
+}
+
+function InlineChartBlock({ chart }: { chart: InlineChart }) {
+  const hasValue2 = chart.data.some(d => d.value2 !== undefined)
+  const rechartData = chart.data.map(d => ({ name: d.label, value: d.value, value2: d.value2 }))
+  const axisStyle = { fontSize: 10, fill: '#94A3B8' }
+  const gridColor = 'rgba(148,163,184,0.2)'
+  const tooltipStyle = { fontSize: 12, borderRadius: 8, border: '1px solid #E2E8F0', padding: '4px 10px' }
+
+  return (
+    <div className="mt-3 w-full rounded-xl border border-border bg-card overflow-hidden">
+      <div className="px-4 pt-3 pb-0">
+        <p className="text-xs font-semibold text-foreground">{chart.title}</p>
+      </div>
+
+      {chart.chart_type === 'pie' ? (
+        <div className="h-52">
+          <ResponsiveContainer width="100%" height="100%">
+            <PieChart margin={{ top: 8, right: 8, bottom: 8, left: 8 }}>
+              <Pie
+                data={rechartData}
+                dataKey="value"
+                nameKey="name"
+                cx="50%"
+                cy="50%"
+                outerRadius={72}
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                label={({ name, percent }: any) => `${name ?? ''} ${(((percent as number) ?? 0) * 100).toFixed(0)}%`}
+                labelLine={false}
+                fontSize={10}
+              >
+                {rechartData.map((_, idx) => (
+                  <Cell key={idx} fill={CHART_COLORS[idx % CHART_COLORS.length]} />
+                ))}
+              </Pie>
+              <Tooltip contentStyle={tooltipStyle} />
+            </PieChart>
+          </ResponsiveContainer>
+        </div>
+      ) : chart.chart_type === 'line' ? (
+        <div className="h-52">
+          <ResponsiveContainer width="100%" height="100%">
+            <LineChart data={rechartData} margin={{ top: 8, right: 16, bottom: chart.x_label ? 28 : 8, left: chart.y_label ? 8 : -8 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke={gridColor} />
+              <XAxis
+                dataKey="name"
+                tick={axisStyle}
+                label={chart.x_label ? { value: chart.x_label, position: 'insideBottom', offset: -14, style: { fontSize: 10, fill: '#94A3B8' } } : undefined}
+              />
+              <YAxis
+                tick={axisStyle}
+                width={40}
+                label={chart.y_label ? { value: chart.y_label, angle: -90, position: 'insideLeft', offset: 8, style: { fontSize: 10, fill: '#94A3B8' } } : undefined}
+              />
+              <Tooltip contentStyle={tooltipStyle} />
+              {hasValue2 && <Legend wrapperStyle={{ fontSize: 11, paddingTop: 4 }} />}
+              <Line type="monotone" dataKey="value" stroke="#1D4ED8" strokeWidth={2} dot={false} activeDot={{ r: 4 }} />
+              {hasValue2 && <Line type="monotone" dataKey="value2" stroke="#F59E0B" strokeWidth={2} dot={false} activeDot={{ r: 4 }} />}
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+      ) : (
+        <div className="h-52">
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={rechartData} margin={{ top: 8, right: 16, bottom: chart.x_label ? 28 : 8, left: chart.y_label ? 8 : -8 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke={gridColor} />
+              <XAxis
+                dataKey="name"
+                tick={axisStyle}
+                label={chart.x_label ? { value: chart.x_label, position: 'insideBottom', offset: -14, style: { fontSize: 10, fill: '#94A3B8' } } : undefined}
+              />
+              <YAxis
+                tick={axisStyle}
+                width={40}
+                label={chart.y_label ? { value: chart.y_label, angle: -90, position: 'insideLeft', offset: 8, style: { fontSize: 10, fill: '#94A3B8' } } : undefined}
+              />
+              <Tooltip contentStyle={tooltipStyle} />
+              {hasValue2 && <Legend wrapperStyle={{ fontSize: 11, paddingTop: 4 }} />}
+              <Bar dataKey="value" fill="#1D4ED8" radius={[4, 4, 0, 0]} maxBarSize={48} />
+              {hasValue2 && <Bar dataKey="value2" fill="#F59E0B" radius={[4, 4, 0, 0]} maxBarSize={48} />}
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      )}
+    </div>
+  )
+}
+
 function AssistantMessage({ content, streaming }: { content: string; streaming?: boolean }) {
   if (streaming && !content) {
     return <CircleNotch size={14} className="animate-spin text-muted-foreground" />
@@ -313,6 +450,9 @@ function AssistantMessage({ content, streaming }: { content: string; streaming?:
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           code({ inline, className, children, ...props }: any) {
             const match = /language-(\w+)/.exec(className || '')
+            if (!inline && match?.[1] === 'mermaid') {
+              return <MermaidDiagram code={String(children).replace(/\n$/, '')} />
+            }
             return !inline && match ? (
               <SyntaxHighlighter
                 style={oneDark}
@@ -951,6 +1091,7 @@ export function TutorClient({ courses, sessions: initialSessions, hasApiKey = tr
                 kind?: 'flashcards' | 'quiz'; topic?: string; count?: number; data?: object[]
                 score?: number; rationale?: string
                 target?: string; replacement?: string; instruction?: string
+                chart_type?: string; title?: string; x_label?: string; y_label?: string
               }
 
               if (event.t === 'text' && event.c) {
@@ -1038,6 +1179,22 @@ export function TutorClient({ courses, sessions: initialSessions, hasApiKey = tr
                   }
                   return updated
                 })
+              } else if (event.t === 'chart' && event.chart_type) {
+                const chart: InlineChart = {
+                  chart_type: event.chart_type as 'line' | 'bar' | 'pie',
+                  title: event.title ?? '',
+                  data: (event.data as { label: string; value: number; value2?: number }[]) ?? [],
+                  x_label: event.x_label,
+                  y_label: event.y_label,
+                }
+                setMessages(prev => {
+                  const updated = [...prev]
+                  updated[updated.length - 1] = {
+                    ...updated[updated.length - 1],
+                    inlineChart: chart,
+                  }
+                  return updated
+                })
               } else if (event.t === 'error') {
                 errored = true
                 const errMsg = event.c ?? 'Something went wrong'
@@ -1059,11 +1216,13 @@ export function TutorClient({ courses, sessions: initialSessions, hasApiKey = tr
         segments.forEach(s => { s.done = true })
         setMessages(prev => {
           const updated = [...prev]
+          const last = updated[updated.length - 1]
           updated[updated.length - 1] = {
             role: 'assistant',
             content: accumulated,
             segments: segments.length > 0 ? segments.map(s => ({ ...s })) : undefined,
             inlineCards: cardPayloads.length > 0 ? cardPayloads : undefined,
+            inlineChart: last.inlineChart,
             grade: gradeResult,
           }
           return updated
@@ -1377,6 +1536,9 @@ export function TutorClient({ courses, sessions: initialSessions, hasApiKey = tr
                           streaming={msg.streaming && !msg.segments?.some(s => !s.done)}
                         />
                       </div>
+                    )}
+                    {msg.inlineChart && (
+                      <InlineChartBlock chart={msg.inlineChart} />
                     )}
                     {msg.inlineCards?.map((card, ci) => (
                       <InlineCardChip

@@ -256,6 +256,37 @@ export async function POST(request: Request) {
       },
     },
     {
+      name: 'create_chart',
+      description: 'Render a visual chart directly in the chat. Use for quantitative data — comparisons between discrete values, trends over a range, proportions of a whole. Examples: topic frequency by professor weight, sin(x) plotted over 0–2π, exam score distributions, grade breakdowns. Do NOT use for processes, flows, or relationships between concepts — use a ```mermaid code block for those instead.',
+      input_schema: {
+        type: 'object' as const,
+        properties: {
+          chart_type: {
+            type: 'string',
+            enum: ['line', 'bar', 'pie'],
+            description: 'line: continuous trends or function plots. bar: comparisons between discrete categories. pie: proportions of a whole (use sparingly, only when parts-of-whole is the point).',
+          },
+          title: { type: 'string', description: 'Chart title shown above the chart' },
+          data: {
+            type: 'array',
+            description: 'Data points. label is the x-axis category or tick. value is the primary y-axis quantity. value2 is an optional second series.',
+            items: {
+              type: 'object',
+              properties: {
+                label: { type: 'string', description: 'Category name or x-axis label' },
+                value: { type: 'number', description: 'Primary value' },
+                value2: { type: 'number', description: 'Optional second series — omit unless comparing two datasets' },
+              },
+              required: ['label', 'value'],
+            },
+          },
+          x_label: { type: 'string', description: 'Optional x-axis label' },
+          y_label: { type: 'string', description: 'Optional y-axis label' },
+        },
+        required: ['chart_type', 'title', 'data'],
+      },
+    },
+    {
       name: 'write_wiki_pattern',
       description: 'Write a durable, non-obvious learning pattern about this student to their wiki. Only call for genuinely persistent patterns — not routine interactions.',
       input_schema: {
@@ -450,6 +481,23 @@ export async function POST(request: Request) {
 
                 controller.enqueue(emit({ t: 'grade', score: input.score, rationale: input.rationale, topic: input.topic_name }))
                 toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: 'Grade recorded.' })
+              } else if (block.name === 'create_chart') {
+                const input = block.input as {
+                  chart_type: string
+                  title: string
+                  data: { label: string; value: number; value2?: number }[]
+                  x_label?: string
+                  y_label?: string
+                }
+                controller.enqueue(emit({
+                  t: 'chart',
+                  chart_type: input.chart_type,
+                  title: input.title,
+                  data: input.data,
+                  x_label: input.x_label,
+                  y_label: input.y_label,
+                }))
+                toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: 'Chart rendered inline in the chat.' })
               } else if (block.name === 'write_wiki_pattern') {
                 const input = block.input as { file: string; insight: string }
                 const existing = await readWikiFile(user.id, input.file) ?? ''
