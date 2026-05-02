@@ -282,6 +282,8 @@ export async function POST(request: Request) {
           },
           x_label: { type: 'string', description: 'Optional x-axis label' },
           y_label: { type: 'string', description: 'Optional y-axis label' },
+          value_label: { type: 'string', description: 'Legend label for the primary series (e.g. "sin(x)")' },
+          value2_label: { type: 'string', description: 'Legend label for the second series (e.g. "cos(x)")' },
         },
         required: ['chart_type', 'title', 'data'],
       },
@@ -488,6 +490,8 @@ export async function POST(request: Request) {
                   data: { label: string; value: number; value2?: number }[]
                   x_label?: string
                   y_label?: string
+                  value_label?: string
+                  value2_label?: string
                 }
                 controller.enqueue(emit({
                   t: 'chart',
@@ -496,6 +500,8 @@ export async function POST(request: Request) {
                   data: input.data,
                   x_label: input.x_label,
                   y_label: input.y_label,
+                  value_label: input.value_label,
+                  value2_label: input.value2_label,
                 }))
                 toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: 'Chart rendered inline in the chat.' })
               } else if (block.name === 'write_wiki_pattern') {

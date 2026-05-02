@@ -63,6 +63,8 @@ type InlineChart = {
   data: { label: string; value: number; value2?: number }[]
   x_label?: string
   y_label?: string
+  value_label?: string
+  value2_label?: string
 }
 type LocalAttachment = { name: string; type: string; data: string; preview?: string; source?: 'material' }
 type GradeResult = { score: number; rationale: string; topic: string }
@@ -343,6 +345,8 @@ function MermaidDiagram({ code }: { code: string }) {
 function InlineChartBlock({ chart }: { chart: InlineChart }) {
   const hasValue2 = chart.data.some(d => d.value2 !== undefined)
   const rechartData = chart.data.map(d => ({ name: d.label, value: d.value, value2: d.value2 }))
+  const v1Name = chart.value_label ?? 'value'
+  const v2Name = chart.value2_label ?? 'value2'
   const axisStyle = { fontSize: 10, fill: '#94A3B8' }
   const gridColor = 'rgba(148,163,184,0.2)'
   const tooltipStyle = { fontSize: 12, borderRadius: 8, border: '1px solid #E2E8F0', padding: '4px 10px' }
@@ -394,8 +398,8 @@ function InlineChartBlock({ chart }: { chart: InlineChart }) {
               />
               <Tooltip contentStyle={tooltipStyle} />
               {hasValue2 && <Legend wrapperStyle={{ fontSize: 11, paddingTop: 4 }} />}
-              <Line type="monotone" dataKey="value" stroke="#1D4ED8" strokeWidth={2} dot={false} activeDot={{ r: 4 }} />
-              {hasValue2 && <Line type="monotone" dataKey="value2" stroke="#F59E0B" strokeWidth={2} dot={false} activeDot={{ r: 4 }} />}
+              <Line type="monotone" dataKey="value" name={v1Name} stroke="#1D4ED8" strokeWidth={2} dot={false} activeDot={{ r: 4 }} />
+              {hasValue2 && <Line type="monotone" dataKey="value2" name={v2Name} stroke="#F59E0B" strokeWidth={2} dot={false} activeDot={{ r: 4 }} />}
             </LineChart>
           </ResponsiveContainer>
         </div>
@@ -416,8 +420,8 @@ function InlineChartBlock({ chart }: { chart: InlineChart }) {
               />
               <Tooltip contentStyle={tooltipStyle} />
               {hasValue2 && <Legend wrapperStyle={{ fontSize: 11, paddingTop: 4 }} />}
-              <Bar dataKey="value" fill="#1D4ED8" radius={[4, 4, 0, 0]} maxBarSize={48} />
-              {hasValue2 && <Bar dataKey="value2" fill="#F59E0B" radius={[4, 4, 0, 0]} maxBarSize={48} />}
+              <Bar dataKey="value" name={v1Name} fill="#1D4ED8" radius={[4, 4, 0, 0]} maxBarSize={48} />
+              {hasValue2 && <Bar dataKey="value2" name={v2Name} fill="#F59E0B" radius={[4, 4, 0, 0]} maxBarSize={48} />}
             </BarChart>
           </ResponsiveContainer>
         </div>
@@ -1092,6 +1096,7 @@ export function TutorClient({ courses, sessions: initialSessions, hasApiKey = tr
                 score?: number; rationale?: string
                 target?: string; replacement?: string; instruction?: string
                 chart_type?: string; title?: string; x_label?: string; y_label?: string
+                value_label?: string; value2_label?: string
               }
 
               if (event.t === 'text' && event.c) {
@@ -1186,6 +1191,8 @@ export function TutorClient({ courses, sessions: initialSessions, hasApiKey = tr
                   data: (event.data as { label: string; value: number; value2?: number }[]) ?? [],
                   x_label: event.x_label,
                   y_label: event.y_label,
+                  value_label: event.value_label,
+                  value2_label: event.value2_label,
                 }
                 setMessages(prev => {
                   const updated = [...prev]
