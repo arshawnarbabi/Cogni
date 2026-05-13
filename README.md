@@ -6,6 +6,7 @@
   <img src="https://img.shields.io/badge/TypeScript-5-3178C6" alt="TypeScript" />
   <img src="https://img.shields.io/badge/Supabase-PostgreSQL-3ECF8E" alt="Supabase" />
   <img src="https://img.shields.io/badge/Claude-Sonnet%204.6-CC785C" alt="Claude" />
+  <a href="https://trycogni.vercel.app/"><img src="https://img.shields.io/badge/website-trycogni.vercel.app-1D4ED8" alt="Website" /></a>
   <a href="https://vercel.com/new/clone?repository-url=https://github.com/s24b/Cogni"><img src="https://vercel.com/button" alt="Deploy with Vercel" /></a>
 </p>
 
@@ -244,5 +245,3 @@ Vercel Cron Jobs do not run locally (scheduler fires at 5am UTC, nudge at 6am UT
 ## ⚠️ Active Project
 
 Cogni is an active personal project. Most features work as described, but some may have rough edges or occasional bugs — contributions and bug reports are welcome.
-
-> **Live demo** — [cogni-dun-phi.vercel.app](https://cogni-dun-phi.vercel.app) is the author's personal deployment. To use Cogni, deploy your own instance — your data and API keys stay in your own Supabase project.
