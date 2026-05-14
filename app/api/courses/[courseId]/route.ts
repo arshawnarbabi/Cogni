@@ -28,13 +28,15 @@ export async function DELETE(
     .from('materials')
     .select('storage_path')
     .eq('course_id', courseId)
+    .eq('user_id', user.id)
 
   const storagePaths = (materials ?? [])
     .map((m: { storage_path: string }) => m.storage_path)
     .filter(Boolean)
 
   if (storagePaths.length > 0) {
-    await service.storage.from('materials').remove(storagePaths)
+    const { error: storageError } = await service.storage.from('materials').remove(storagePaths)
+    if (storageError) return NextResponse.json({ error: storageError.message }, { status: 500 })
   }
 
   // Delete professor wiki file
@@ -45,11 +47,12 @@ export async function DELETE(
   }
 
   // Delete course row — cascades to topics, flashcards, materials, test_results, session_messages
-  await service
+  const { error: deleteError } = await service
     .from('courses')
     .delete()
     .eq('course_id', courseId)
     .eq('user_id', user.id)
+  if (deleteError) return NextResponse.json({ error: deleteError.message }, { status: 500 })
 
   return NextResponse.json({ ok: true })
 }

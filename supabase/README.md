@@ -6,8 +6,8 @@ Run these SQL files in the Supabase SQL editor **in this order** for a fresh dep
 - `schema.sql` — all tables, RLS, and indexes
 
 ## 2. Vault (run after enabling the Vault extension in Supabase dashboard)
-- `vault-helpers.sql` — `store_user_api_key` RPC
-- `vault-get.sql` — `get_user_api_key` RPC
+- `vault-helpers.sql` — API key and named user-secret storage RPCs
+- `vault-get.sql` — API key and named user-secret retrieval RPCs
 
 ## 3. Storage buckets
 - `storage-buckets.sql` — `materials`, `wiki`, `audio` buckets + RLS policies
@@ -26,6 +26,8 @@ Run these SQL files in the Supabase SQL editor **in this order** for a fresh dep
 - `streak-columns.sql` — `users.study_streak`, `users.last_study_date`
 - `inbox-unreadable-status.sql` — adds `unreadable` to inbox status constraint
 - `tutor-rate-limit.sql` — `users.daily_message_limit`
+- `user-timezone.sql` — `users.timezone`
+- `calendar-token-vault-migration.sql` — makes calendar token columns nullable after moving token secrets to Vault
 
 ## 6. Functions
 - `fsrs-review-rpc.sql` — `review_card_atomic` function (atomic FSRS + mastery update)

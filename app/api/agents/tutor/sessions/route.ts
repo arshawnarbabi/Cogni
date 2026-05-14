@@ -1,5 +1,6 @@
 import { createClient, createServiceClient } from '@/lib/supabase/server'
 import { listUserSessions } from '@/lib/agents/tutor'
+import { requireOwnedSession } from '@/lib/authz'
 import { NextResponse } from 'next/server'
 
 export async function GET() {
@@ -21,14 +22,17 @@ export async function PATCH(request: Request) {
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   const { essay_content } = await request.json() as { essay_content: string }
+  const session = await requireOwnedSession(user.id, sessionId)
+  if (!session) return NextResponse.json({ error: 'Not found' }, { status: 404 })
 
   const service = createServiceClient()
-  await service
+  const { error } = await service
     .from('session_log')
     .update({ essay_content, updated_at: new Date().toISOString() })
     .eq('session_id', sessionId)
     .eq('user_id', user.id)
 
+  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
   return NextResponse.json({ ok: true })
 }
 
@@ -41,19 +45,14 @@ export async function DELETE(request: Request) {
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
-  const service = createServiceClient()
   // Verify ownership before deleting
-  const { data: session } = await service
-    .from('session_log')
-    .select('session_id')
-    .eq('session_id', sessionId)
-    .eq('user_id', user.id)
-    .single()
-
+  const session = await requireOwnedSession(user.id, sessionId)
   if (!session) return NextResponse.json({ error: 'Not found' }, { status: 404 })
 
   // session_messages cascade via FK
-  await service.from('session_log').delete().eq('session_id', sessionId)
+  const service = createServiceClient()
+  const { error } = await service.from('session_log').delete().eq('session_id', sessionId).eq('user_id', user.id)
+  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
 
   return NextResponse.json({ ok: true })
 }

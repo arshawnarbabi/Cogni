@@ -20,7 +20,7 @@ import {
   ArrowClockwise,
   ImageBroken,
   WarningCircle,
-  Image,
+  Image as ImageIcon,
 } from '@phosphor-icons/react'
 
 type InboxItem = {
@@ -83,7 +83,7 @@ function FileIcon({ fileType }: { fileType: string | null }) {
   if (fileType === 'pdf') return <FilePdf size={18} className="text-red-400" weight="fill" />
   if (fileType === 'typed') return <Keyboard size={18} className="text-primary" weight="fill" />
   if (fileType === 'txt' || fileType === 'md') return <FileText size={18} className="text-muted-foreground" weight="fill" />
-  if (fileType === 'png' || fileType === 'jpg' || fileType === 'jpeg' || fileType === 'webp') return <Image size={18} className="text-blue-400" weight="fill" />
+  if (fileType === 'png' || fileType === 'jpg' || fileType === 'jpeg' || fileType === 'webp') return <ImageIcon size={18} className="text-blue-400" weight="fill" />
   return <File size={18} className="text-muted-foreground" weight="fill" />
 }
 

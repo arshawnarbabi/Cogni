@@ -25,11 +25,17 @@ export async function DELETE(
 
   // Delete from storage
   if (material.storage_path) {
-    await service.storage.from('materials').remove([material.storage_path])
+    const { error: storageError } = await service.storage.from('materials').remove([material.storage_path])
+    if (storageError) return NextResponse.json({ error: storageError.message }, { status: 500 })
   }
 
   // Delete DB row (cascades to embeddings if foreign key is set)
-  await service.from('materials').delete().eq('material_id', materialId)
+  const { error: deleteError } = await service
+    .from('materials')
+    .delete()
+    .eq('material_id', materialId)
+    .eq('user_id', user.id)
+  if (deleteError) return NextResponse.json({ error: deleteError.message }, { status: 500 })
 
   return NextResponse.json({ ok: true })
 }

@@ -1,5 +1,6 @@
 import { createServiceClient } from '@/lib/supabase/server'
 import { writeStudyBlocksToCalendar } from '@/lib/calendar'
+import { addDaysToDateKey, dateKeyInTimeZone } from '@/lib/time'
 
 export type TaskItem =
   | {
@@ -77,15 +78,16 @@ function buildInsight(params: {
 
 export async function runScheduler(userId: string): Promise<void> {
   const service = createServiceClient()
-  const today = new Date().toISOString().split('T')[0]
 
   const { data: userRow } = await service
     .from('users')
-    .select('session_length_preference')
+    .select('session_length_preference, timezone')
     .eq('user_id', userId)
     .single()
 
   const sessionMinutes = userRow?.session_length_preference ?? 45
+  const timeZone = userRow?.timezone ?? 'UTC'
+  const today = dateKeyInTimeZone(new Date(), timeZone)
 
   const { data: courses } = await service
     .from('courses')
@@ -130,6 +132,7 @@ export async function runScheduler(userId: string): Promise<void> {
     service
       .from('topics')
       .select('course_id, topic_id, name, professor_weight')
+      .eq('user_id', userId)
       .in('course_id', courseIds),
     service
       .from('flashcards')
@@ -312,9 +315,7 @@ export async function runScheduler(userId: string): Promise<void> {
     })
 
   // Homework blocks — due today or overdue, not yet completed
-  const tomorrow = new Date(today)
-  tomorrow.setDate(tomorrow.getDate() + 1)
-  const tomorrowStr = tomorrow.toISOString().split('T')[0]
+  const tomorrowStr = addDaysToDateKey(today, 1)
 
   const { data: assignments } = await service
     .from('assignments')
@@ -385,6 +386,14 @@ export async function runScheduler(userId: string): Promise<void> {
 export async function generateUpcomingPreview(userId: string): Promise<void> {
   const service = createServiceClient()
 
+  const { data: userRow } = await service
+    .from('users')
+    .select('timezone')
+    .eq('user_id', userId)
+    .single()
+  const timeZone = userRow?.timezone ?? 'UTC'
+  const today = dateKeyInTimeZone(new Date(), timeZone)
+
   const { data: courses } = await service
     .from('courses')
     .select('course_id, name')
@@ -403,16 +412,10 @@ export async function generateUpcomingPreview(userId: string): Promise<void> {
   // Build the 6-day window upfront.
   const dateStrs: string[] = []
   for (let dayOffset = 1; dayOffset <= 6; dayOffset++) {
-    const d = new Date()
-    d.setDate(d.getDate() + dayOffset)
-    dateStrs.push(d.toISOString().split('T')[0])
+    dateStrs.push(addDaysToDateKey(today, dayOffset))
   }
   const windowStart = dateStrs[0]
-  const windowEndExclusive = (() => {
-    const d = new Date()
-    d.setDate(d.getDate() + 7)
-    return d.toISOString().split('T')[0]
-  })()
+  const windowEndExclusive = addDaysToDateKey(today, 7)
 
   // Batch: existing plans + all due cards in window + all pending homework in window.
   const [existingPlansResult, dueCardsResult, assignmentsResult] = await Promise.all([

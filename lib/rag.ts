@@ -55,11 +55,23 @@ export async function processEmbeddings(
   const openaiKey = await getUserKey(userId, 'openai_key')
   const service = createServiceClient()
 
+  const { data: material } = await service
+    .from('materials')
+    .select('material_id')
+    .eq('material_id', materialId)
+    .eq('user_id', userId)
+    .single()
+  if (!material) return
+
   const chunks = chunkText(text)
   if (chunks.length === 0) return
 
   // Replace existing embeddings for this material
-  await service.from('material_embeddings').delete().eq('material_id', materialId)
+  await service
+    .from('material_embeddings')
+    .delete()
+    .eq('material_id', materialId)
+    .eq('user_id', userId)
 
   if (openaiKey) {
     const { default: OpenAI } = await import('openai')

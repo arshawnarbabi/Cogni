@@ -241,7 +241,7 @@ export function KnowledgeStore({
     return (
       <div className="rounded-xl border border-border bg-card p-5">
         <p className="text-sm font-semibold text-foreground">Knowledge Store</p>
-        <p className="mt-1 text-xs text-muted-foreground">No wiki files yet. They'll appear here as Cogni learns about you.</p>
+        <p className="mt-1 text-xs text-muted-foreground">No wiki files yet. They&apos;ll appear here as Cogni learns about you.</p>
       </div>
     )
   }
@@ -251,7 +251,7 @@ export function KnowledgeStore({
       <div>
         <p className="text-sm font-semibold text-foreground">Knowledge Store</p>
         <p className="mt-0.5 text-xs text-muted-foreground">
-          Cogni's memory about you. Edit or delete entries — changes take effect immediately.
+          Cogni&apos;s memory about you. Edit or delete entries — changes take effect immediately.
         </p>
       </div>
 

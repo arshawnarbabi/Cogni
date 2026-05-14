@@ -1,6 +1,7 @@
 import { createClient, createServiceClient } from '@/lib/supabase/server'
 import { initWiki } from '@/lib/wiki'
 import { runProfiler } from '@/lib/agents/profiler'
+import { requireOwnedProfessor } from '@/lib/authz'
 import { NextResponse } from 'next/server'
 
 type CourseInput = {
@@ -24,11 +25,12 @@ function inferFileType(filename: string): string {
 }
 
 export async function POST(request: Request) {
-  const { displayName, sessionLength, courses, syllabuses } = await request.json() as {
+  const { displayName, sessionLength, courses, syllabuses, timezone } = await request.json() as {
     displayName: string
     sessionLength: number
     courses: CourseInput[]
     syllabuses: SyllabusInput[]
+    timezone?: string
   }
 
   const supabase = await createClient()
@@ -40,11 +42,15 @@ export async function POST(request: Request) {
 
   const service = createServiceClient()
 
-  const { error: userError } = await service.from('users').insert({
-    user_id: user.id,
-    display_name: displayName.trim() || 'Student',
-    session_length_preference: sessionLength,
-  })
+  const { error: userError } = await service.from('users').upsert(
+    {
+      user_id: user.id,
+      display_name: displayName.trim() || 'Student',
+      session_length_preference: sessionLength,
+      timezone: timezone || 'UTC',
+    },
+    { onConflict: 'user_id' }
+  )
 
   if (userError) {
     return NextResponse.json({ error: userError.message }, { status: 500 })
@@ -55,6 +61,13 @@ export async function POST(request: Request) {
 
   for (const course of courses) {
     let professorId = course.existingProfessorId
+
+    if (professorId) {
+      const ownedProfessor = await requireOwnedProfessor(user.id, professorId)
+      if (!ownedProfessor) {
+        return NextResponse.json({ error: 'Professor not found' }, { status: 404 })
+      }
+    }
 
     if (!professorId) {
       const { data: prof, error: profError } = await service
@@ -89,6 +102,10 @@ export async function POST(request: Request) {
   for (const syl of syllabuses) {
     const courseId = courseIdMap[syl.courseTemp]
     if (!courseId) continue
+    if (!syl.storagePath.startsWith(`${user.id}/`)) {
+      console.error('[onboarding] rejected syllabus path outside user prefix', syl.storagePath)
+      continue
+    }
 
     const fileType = inferFileType(syl.fileName)
 

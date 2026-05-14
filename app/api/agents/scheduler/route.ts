@@ -1,5 +1,6 @@
 import { createClient } from '@/lib/supabase/server'
 import { runScheduler } from '@/lib/agents/scheduler'
+import { isValidCronRequest } from '@/lib/cron'
 import { NextResponse } from 'next/server'
 
 export async function POST() {
@@ -14,8 +15,7 @@ export async function POST() {
 // Vercel Cron Job handler — called daily at 05:00 UTC
 // All active users: query users table and run scheduler for each
 export async function GET(request: Request) {
-  const authHeader = request.headers.get('authorization')
-  if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
+  if (!isValidCronRequest(request)) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 

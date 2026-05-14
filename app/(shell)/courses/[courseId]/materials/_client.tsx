@@ -6,7 +6,7 @@ import {
   ArrowLeft,
   FilePdf,
   FileText,
-  Image,
+  Image as ImageIcon,
   MagnifyingGlass,
   Trash,
   Funnel,
@@ -30,7 +30,7 @@ const TIER_LABELS: Record<number, string> = {
 
 function FileIcon({ fileType }: { fileType: string | null }) {
   if (fileType === 'pdf') return <FilePdf size={16} className="text-red-400 shrink-0" weight="fill" />
-  if (fileType === 'image') return <Image size={16} className="text-blue-400 shrink-0" weight="fill" />
+  if (fileType === 'image') return <ImageIcon size={16} className="text-blue-400 shrink-0" weight="fill" />
   return <FileText size={16} className="text-muted-foreground shrink-0" weight="fill" />
 }
 

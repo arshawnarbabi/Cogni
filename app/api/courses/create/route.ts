@@ -1,6 +1,8 @@
 import { createClient, createServiceClient } from '@/lib/supabase/server'
 import { runProfiler } from '@/lib/agents/profiler'
 import { getUserApiKey } from '@/lib/vault'
+import { requireOwnedProfessor } from '@/lib/authz'
+import { hasExpectedFileSignature } from '@/lib/file-validation'
 import { ICON_NAMES } from '@/lib/course-icon-names'
 import Anthropic from '@anthropic-ai/sdk'
 import { NextResponse } from 'next/server'
@@ -26,7 +28,11 @@ async function assignCourseIcon(userId: string, courseId: string, courseName: st
     const parsed = JSON.parse(match[0])
     if (!(ICON_NAMES as readonly string[]).includes(parsed.icon)) return
     const service = createServiceClient()
-    await service.from('courses').update({ icon: parsed.icon, icon_color: parsed.color ?? 'blue' }).eq('course_id', courseId)
+    await service
+      .from('courses')
+      .update({ icon: parsed.icon, icon_color: parsed.color ?? 'blue' })
+      .eq('course_id', courseId)
+      .eq('user_id', userId)
   } catch { /* silent — icon assignment is best-effort */ }
 }
 
@@ -55,6 +61,13 @@ export async function POST(request: Request) {
   const service = createServiceClient()
 
   let professorId = existingProfessorId
+  if (professorId) {
+    const ownedProfessor = await requireOwnedProfessor(user.id, professorId)
+    if (!ownedProfessor) {
+      return NextResponse.json({ error: 'Professor not found' }, { status: 404 })
+    }
+  }
+
   if (!professorId) {
     const { data: prof, error: profError } = await service
       .from('professors')
@@ -90,6 +103,9 @@ export async function POST(request: Request) {
     if (!['pdf', 'txt', 'md'].includes(ext)) {
       return NextResponse.json({ ok: true, courseId, warning: 'Course created, but syllabus must be PDF, TXT, or MD.' })
     }
+    if (!await hasExpectedFileSignature(syllabus, ext)) {
+      return NextResponse.json({ ok: true, courseId, warning: 'Course created, but syllabus contents did not match its extension.' })
+    }
 
     const safeName = syllabus.name.replace(/[^a-zA-Z0-9._-]/g, '_')
     const path = `${user.id}/syllabuses/${Date.now()}_${safeName}`
@@ -117,6 +133,7 @@ export async function POST(request: Request) {
       .single()
 
     if (materialError || !material) {
+      await service.storage.from('materials').remove([path])
       return NextResponse.json({ ok: true, courseId, warning: `Course created, syllabus metadata failed: ${materialError?.message ?? 'unknown error'}` })
     }
 

@@ -38,6 +38,7 @@ export async function GET(
         .from('material_embeddings')
         .select('content, chunk_index')
         .eq('material_id', materialId)
+        .eq('user_id', user.id)
         .order('chunk_index', { ascending: true })
         .limit(1)
 
@@ -47,6 +48,7 @@ export async function GET(
           .from('material_embeddings')
           .select('content')
           .eq('material_id', materialId)
+          .eq('user_id', user.id)
           .order('chunk_index', { ascending: true })
 
         const content = (allChunks ?? []).map((c: { content: string }) => c.content).join('\n\n').slice(0, MAX_CHARS)

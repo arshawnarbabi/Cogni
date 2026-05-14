@@ -1,5 +1,6 @@
 import { createClient, createServiceClient } from '@/lib/supabase/server'
 import { cleanupCogniCalendar } from '@/lib/calendar'
+import { setUserSecret } from '@/lib/vault'
 import { NextResponse } from 'next/server'
 
 export async function POST() {
@@ -19,6 +20,11 @@ export async function POST() {
     .delete()
     .eq('user_id', user.id)
     .eq('provider', 'google')
+
+  await Promise.all([
+    setUserSecret(user.id, 'google_calendar_access_token', ''),
+    setUserSecret(user.id, 'google_calendar_refresh_token', ''),
+  ]).catch(e => console.error('[calendar] vault cleanup failed:', e))
 
   return NextResponse.json({ ok: true })
 }

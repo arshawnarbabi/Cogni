@@ -1,6 +1,7 @@
 import { createClient } from '@/lib/supabase/server'
 import { getUserApiKey } from '@/lib/vault'
 import { gradeAndRecord, type QuizQuestion } from '@/lib/agents/practice-quiz'
+import { requireOwnedCourse } from '@/lib/authz'
 import { NextResponse } from 'next/server'
 
 export async function POST(request: Request) {
@@ -22,6 +23,8 @@ export async function POST(request: Request) {
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  const ownedCourse = await requireOwnedCourse(user.id, courseId)
+  if (!ownedCourse) return NextResponse.json({ error: 'Course not found' }, { status: 404 })
 
   const apiKey = await getUserApiKey(user.id)
 

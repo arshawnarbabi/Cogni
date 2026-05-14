@@ -14,9 +14,9 @@ export async function GET(request: Request) {
   const courseId = searchParams.get('courseId')
   if (!courseId) return NextResponse.json({ error: 'Missing courseId' }, { status: 400 })
 
-  const files = await listCourseFiles(courseId)
+  const files = await listCourseFiles(user.id, courseId)
   const withUrls = await Promise.all(
-    files.map(async f => ({ ...f, url: await getFileUrl(f.storage_path) }))
+    files.map(async f => ({ ...f, url: await getFileUrl(user.id, f.file_id) }))
   )
   return NextResponse.json({ files: withUrls })
 }

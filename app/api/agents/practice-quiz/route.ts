@@ -1,5 +1,6 @@
 import { createClient } from '@/lib/supabase/server'
 import { generatePracticeQuiz, type QuizFormat } from '@/lib/agents/practice-quiz'
+import { requireOwnedCourse } from '@/lib/authz'
 import { NextResponse } from 'next/server'
 
 const MOCK_QUESTIONS = [
@@ -46,6 +47,8 @@ export async function POST(request: Request) {
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  const ownedCourse = await requireOwnedCourse(user.id, courseId)
+  if (!ownedCourse) return NextResponse.json({ error: 'Course not found' }, { status: 404 })
 
   if (process.env.NEXT_PUBLIC_MOCK_AGENTS === 'true') {
     const count = Math.min(questionCount ?? 3, MOCK_QUESTIONS.length)

@@ -58,6 +58,7 @@ export async function generatePracticeQuiz(
     .from('topics')
     .select('topic_id, name')
     .eq('course_id', courseId)
+    .eq('user_id', userId)
     .order('syllabus_order', { ascending: true })
     .limit(20)
 
@@ -137,21 +138,23 @@ export async function generateSimulatedExam(
   // Get exam info for timing + past exam question counts
   const { data: exams } = await service
     .from('exams')
-    .select('date, duration_minutes, question_count, grade_weight')
+    .select('date, duration_minutes, grade_weight')
     .eq('course_id', courseId)
+    .eq('user_id', userId)
     .order('date', { ascending: false })
     .limit(3)
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const upcomingExam = (exams ?? []).find((e: any) => new Date(e.date) >= new Date())
   const durationMinutes = upcomingExam?.duration_minutes ?? 60
-  const questionCount = upcomingExam?.question_count ?? 20
+  const questionCount = 20
 
   // Get professor wiki
   const { data: courseRow } = await service
     .from('courses')
     .select('professor_id')
     .eq('course_id', courseId)
+    .eq('user_id', userId)
     .single()
 
   let professorWiki = ''
@@ -164,6 +167,7 @@ export async function generateSimulatedExam(
     .from('topics')
     .select('name, professor_weight, content_coverage')
     .eq('course_id', courseId)
+    .eq('user_id', userId)
     .order('professor_weight', { ascending: false })
     .limit(20)
 
@@ -301,6 +305,7 @@ Return JSON only: {"score": 0.0-1.0, "correct": true/false, "feedback": "one sen
     .from('topics')
     .select('topic_id, name')
     .eq('course_id', courseId)
+    .eq('user_id', userId)
 
   const topicByName = new Map<string, string>()
   for (const t of (courseTopics ?? []) as { topic_id: string; name: string }[]) {
@@ -342,17 +347,22 @@ Return JSON only: {"score": 0.0-1.0, "correct": true/false, "feedback": "one sen
 
       masteryUpserts.push({ user_id: userId, topic_id: r.topic_id, mastery_score: finalScore })
       historyInserts.push({ user_id: userId, topic_id: r.topic_id, mastery_score: finalScore })
-      masteryUpdates.push({ topic_id: r.topic_id, topicName: r.topicName, oldScore, newScore: blended })
+      masteryUpdates.push({ topic_id: r.topic_id, topicName: r.topicName, oldScore, newScore: finalScore })
     }
 
     if (masteryUpserts.length > 0) {
-      await service.from('topic_mastery').upsert(masteryUpserts, { onConflict: 'user_id,topic_id' })
-      await service.from('mastery_history').insert(historyInserts)
+      const { error: masteryError } = await service
+        .from('topic_mastery')
+        .upsert(masteryUpserts, { onConflict: 'user_id,topic_id' })
+      if (masteryError) console.error('[practice-quiz] mastery upsert failed', masteryError)
+
+      const { error: historyError } = await service.from('mastery_history').insert(historyInserts)
+      if (historyError) console.error('[practice-quiz] mastery history insert failed', historyError)
     }
   }
 
   // Write result record
-  await service.from('practice_test_results').insert({
+  const { error: resultError } = await service.from('practice_test_results').insert({
     user_id: userId,
     course_id: courseId,
     test_type: testType,
@@ -364,6 +374,7 @@ Return JSON only: {"score": 0.0-1.0, "correct": true/false, "feedback": "one sen
     mastery_updates: masteryUpdates,
     duration_seconds: durationSeconds ?? null,
   })
+  if (resultError) console.error('[practice-quiz] result insert failed', resultError)
 
   return { correctCount, scorePct, missedTopics, masteryUpdates, results }
 }

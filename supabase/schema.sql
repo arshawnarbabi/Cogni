@@ -18,6 +18,7 @@ create table public.users (
   major text,
   year text,
   session_length_preference integer not null default 45, -- minutes: 25, 45, or 90
+  timezone text not null default 'UTC',
   created_at timestamptz not null default now()
 );
 

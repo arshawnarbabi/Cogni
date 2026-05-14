@@ -1,4 +1,5 @@
 import { createClient, createServiceClient } from '@/lib/supabase/server'
+import { hasExpectedFileSignature } from '@/lib/file-validation'
 import { NextResponse } from 'next/server'
 
 export async function POST(request: Request) {
@@ -16,6 +17,9 @@ export async function POST(request: Request) {
   const ext = file.name.split('.').pop()?.toLowerCase() ?? ''
   if (!['pdf', 'txt', 'md', 'docx'].includes(ext)) {
     return NextResponse.json({ error: 'Unsupported file type. Upload a PDF, TXT, MD, or DOCX.' }, { status: 400 })
+  }
+  if (!await hasExpectedFileSignature(file, ext)) {
+    return NextResponse.json({ error: 'File contents do not match the file extension.' }, { status: 400 })
   }
 
   const service = createServiceClient()

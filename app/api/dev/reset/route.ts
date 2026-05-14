@@ -1,17 +1,19 @@
 import { createClient, createServiceClient } from '@/lib/supabase/server'
 import { NextResponse } from 'next/server'
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function clearStorageBucket(service: any, bucket: string, userId: string) {
-  const prefixes = [userId, `${userId}/syllabuses`]
-  for (const prefix of prefixes) {
+async function clearStorageBucket(service: ReturnType<typeof createServiceClient>, bucket: string, userId: string) {
+  async function collect(prefix: string): Promise<string[]> {
     const { data: files } = await service.storage.from(bucket).list(prefix, { limit: 200 })
-    if (!files?.length) continue
-    const paths = files
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      .filter((f: any) => f.id) // skip folder placeholders
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      .map((f: any) => `${prefix}/${f.name}`)
+    if (!files?.length) return []
+    const nested = await Promise.all(files.map(async (f: { id?: string | null; name: string }) => {
+      const path = `${prefix}/${f.name}`
+      return f.id ? [path] : collect(path)
+    }))
+    return nested.flat()
+  }
+
+  for (const prefix of [userId, `${userId}/syllabuses`]) {
+    const paths = await collect(prefix)
     if (paths.length) await service.storage.from(bucket).remove(paths)
   }
 }
@@ -33,6 +35,8 @@ export async function POST() {
   await Promise.all([
     clearStorageBucket(service, 'wiki', user.id),
     clearStorageBucket(service, 'materials', user.id),
+    clearStorageBucket(service, 'audio', user.id),
+    clearStorageBucket(service, 'course-files', user.id),
   ])
 
   return NextResponse.json({ ok: true })

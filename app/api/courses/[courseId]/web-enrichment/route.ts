@@ -27,8 +27,7 @@ export async function POST(
   if (!courseRow) return NextResponse.json({ error: 'Course not found' }, { status: 404 })
 
   const courseName = courseRow.name as string
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const prof = courseRow.professors as any
+  const prof = courseRow.professors as { name: string } | { name: string }[] | null
   const professorName: string = Array.isArray(prof) ? (prof[0]?.name ?? '') : (prof?.name ?? '')
 
   await runWebEnrichment(user.id, courseId, courseName, professorName, apiKey)

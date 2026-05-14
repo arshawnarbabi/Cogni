@@ -1,6 +1,8 @@
 import { createClient, createServiceClient } from '@/lib/supabase/server'
 import { classifyMaterial } from '@/lib/agents/inbox'
 import { runScheduler } from '@/lib/agents/scheduler'
+import { requireOwnedCourse } from '@/lib/authz'
+import { hasExpectedFileSignature } from '@/lib/file-validation'
 import { NextResponse } from 'next/server'
 
 export async function POST(request: Request) {
@@ -20,6 +22,13 @@ export async function POST(request: Request) {
 
   const service = createServiceClient()
 
+  if (courseIdHint) {
+    const ownedCourse = await requireOwnedCourse(user.id, courseIdHint)
+    if (!ownedCourse) {
+      return NextResponse.json({ error: 'Course not found' }, { status: 404 })
+    }
+  }
+
   let filename: string
   let ext: string
   let fileBlob: Blob
@@ -34,6 +43,9 @@ export async function POST(request: Request) {
     const allowedExts = ['pdf', 'txt', 'md', 'png', 'jpg', 'jpeg', 'webp']
     if (!allowedExts.includes(ext)) {
       return NextResponse.json({ error: 'Unsupported file type. Upload PDF, TXT, PNG, or JPG.' }, { status: 400 })
+    }
+    if (!await hasExpectedFileSignature(file, ext)) {
+      return NextResponse.json({ error: 'File contents do not match the file extension.' }, { status: 400 })
     }
     filename = file.name
     fileBlob = file
@@ -73,7 +85,11 @@ export async function POST(request: Request) {
         )
       }
       // Stuck record — delete it so this upload can proceed cleanly
-      await service.from('materials').delete().eq('material_id', existing[0].material_id)
+      await service
+        .from('materials')
+        .delete()
+        .eq('material_id', existing[0].material_id)
+        .eq('user_id', user.id)
     }
   }
 
@@ -101,6 +117,7 @@ export async function POST(request: Request) {
     .single()
 
   if (materialError || !material) {
+    await service.storage.from('materials').remove([storagePath])
     return NextResponse.json({ error: materialError?.message ?? 'DB error' }, { status: 500 })
   }
 
@@ -115,6 +132,8 @@ export async function POST(request: Request) {
     .single()
 
   if (inboxError || !inboxItem) {
+    await service.storage.from('materials').remove([storagePath])
+    await service.from('materials').delete().eq('material_id', material.material_id).eq('user_id', user.id)
     return NextResponse.json({ error: inboxError?.message ?? 'DB error' }, { status: 500 })
   }
 
@@ -131,7 +150,11 @@ export async function POST(request: Request) {
     )
   } catch (e) {
     // Mark material as failed so the duplicate check allows retry next time
-    await service.from('materials').update({ processing_status: 'failed' }).eq('material_id', material.material_id)
+    await service
+      .from('materials')
+      .update({ processing_status: 'failed' })
+      .eq('material_id', material.material_id)
+      .eq('user_id', user.id)
     return NextResponse.json(
       { error: `File was saved but classification failed: ${e instanceof Error ? e.message : 'unknown error'}. Try uploading again.` },
       { status: 500 }

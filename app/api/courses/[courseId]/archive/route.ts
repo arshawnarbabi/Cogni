@@ -30,6 +30,7 @@ export async function POST(
     .from('topics')
     .select('topic_id')
     .eq('course_id', courseId)
+    .eq('user_id', user.id)
 
   const topicIds = (topics ?? []).map((t: { topic_id: string }) => t.topic_id)
 
@@ -40,6 +41,7 @@ export async function POST(
         .from('flashcards')
         .select('card_id, fsrs_next_review_date')
         .in('topic_id', topicIds)
+        .eq('user_id', user.id)
 
       for (const card of cards ?? []) {
         const currentDue = new Date(card.fsrs_next_review_date)
@@ -49,12 +51,14 @@ export async function POST(
           .from('flashcards')
           .update({ fsrs_next_review_date: newDue.toISOString().split('T')[0] })
           .eq('card_id', card.card_id)
+          .eq('user_id', user.id)
       }
     } else {
       await service
         .from('flashcards')
         .update({ fsrs_next_review_date: '9999-01-01' })
         .in('topic_id', topicIds)
+        .eq('user_id', user.id)
     }
   }
 
@@ -64,10 +68,12 @@ export async function POST(
       .remove([`${user.id}/professor_${course.professor_id}.md`])
   }
 
-  await service
+  const { error: archiveError } = await service
     .from('courses')
     .update({ active_status: 'archived' })
     .eq('course_id', courseId)
+    .eq('user_id', user.id)
+  if (archiveError) return NextResponse.json({ error: archiveError.message }, { status: 500 })
 
   return NextResponse.json({ ok: true })
 }
@@ -84,11 +90,20 @@ export async function DELETE(
 
   const service = createServiceClient()
 
+  const { data: course } = await service
+    .from('courses')
+    .select('course_id')
+    .eq('course_id', courseId)
+    .eq('user_id', user.id)
+    .single()
+  if (!course) return NextResponse.json({ error: 'Not found' }, { status: 404 })
+
   // Reactivate all paused flashcards to today
   const { data: topics } = await service
     .from('topics')
     .select('topic_id')
     .eq('course_id', courseId)
+    .eq('user_id', user.id)
 
   const topicIds = (topics ?? []).map((t: { topic_id: string }) => t.topic_id)
 
@@ -98,14 +113,16 @@ export async function DELETE(
       .from('flashcards')
       .update({ fsrs_next_review_date: today })
       .in('topic_id', topicIds)
+      .eq('user_id', user.id)
       .eq('fsrs_next_review_date', '9999-01-01')
   }
 
-  await service
+  const { error: activateError } = await service
     .from('courses')
     .update({ active_status: 'active' })
     .eq('course_id', courseId)
     .eq('user_id', user.id)
+  if (activateError) return NextResponse.json({ error: activateError.message }, { status: 500 })
 
   return NextResponse.json({ ok: true })
 }

@@ -4,11 +4,12 @@ import {
   buildTutorSystemPrompt,
   getOrCreateSession,
   createSession,
-  getSessionMessages,
+  getOwnedSessionMessages,
   saveMessage,
   autoNameSession,
   type TutorMode,
 } from '@/lib/agents/tutor'
+import { requireOwnedCourse, requireOwnedSession } from '@/lib/authz'
 import { readWikiFile, writeWikiFile } from '@/lib/wiki'
 import { newCardDefaults } from '@/lib/fsrs'
 import { retrieveChunks } from '@/lib/rag'
@@ -52,7 +53,10 @@ export async function GET(request: Request) {
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
-  const messages = await getSessionMessages(sessionId)
+  const session = await requireOwnedSession(user.id, sessionId)
+  if (!session) return NextResponse.json({ error: 'Not found' }, { status: 404 })
+
+  const messages = await getOwnedSessionMessages(sessionId, user.id)
   return NextResponse.json({ messages })
 }
 
@@ -98,6 +102,9 @@ export async function POST(request: Request) {
 
   // Rate limit check
   const service = createServiceClient()
+  const ownedCourse = await requireOwnedCourse(user.id, courseId)
+  if (!ownedCourse) return NextResponse.json({ error: 'Course not found' }, { status: 404 })
+
   const { data: userRow } = await service
     .from('users')
     .select('daily_message_limit')
@@ -118,6 +125,13 @@ export async function POST(request: Request) {
     }
   }
 
+  if (existingSessionId) {
+    const existingSession = await requireOwnedSession(user.id, existingSessionId)
+    if (!existingSession || existingSession.course_id !== courseId) {
+      return NextResponse.json({ error: 'Session not found' }, { status: 404 })
+    }
+  }
+
   const sessionId = existingSessionId
     ?? (forceNew
       ? await createSession(user.id, courseId, mode)
@@ -129,7 +143,7 @@ export async function POST(request: Request) {
 
   const service2 = createServiceClient()
   const [{ data: courseRow }, { data: courseTopics }] = await Promise.all([
-    service2.from('courses').select('course_type, professor_id').eq('course_id', courseId).single(),
+    service2.from('courses').select('course_type, professor_id').eq('course_id', courseId).eq('user_id', user.id).single(),
     service2.from('topics').select('topic_id, name').eq('course_id', courseId).eq('user_id', user.id).order('syllabus_order', { ascending: true }),
   ])
 
@@ -150,7 +164,7 @@ export async function POST(request: Request) {
         topics,
       })
     })(),
-    getSessionMessages(sessionId),
+    getOwnedSessionMessages(sessionId, user.id),
   ])
 
   const client = new Anthropic({ apiKey })
@@ -445,6 +459,7 @@ export async function POST(request: Request) {
                       .from('topics')
                       .update({ content_coverage: coverage })
                       .eq('topic_id', resolvedTopicId)
+                      .eq('user_id', user.id)
                   }
                 } catch { /* non-critical */ }
 
@@ -469,16 +484,24 @@ export async function POST(request: Request) {
                   .from('topics')
                   .select('topic_id')
                   .eq('course_id', courseId)
+                  .eq('user_id', user.id)
                   .ilike('name', input.topic_name)
                   .limit(1)
                   .single()
 
                 if (topic) {
+                  const score = Math.min(1, Math.max(0, Number(input.score)))
                   await service.from('topic_mastery').upsert({
                     user_id: user.id,
                     topic_id: topic.topic_id,
-                    mastery_score: input.score,
+                    mastery_score: score,
+                    last_updated: new Date().toISOString(),
                   }, { onConflict: 'user_id,topic_id' })
+                  await service.from('mastery_history').insert({
+                    user_id: user.id,
+                    topic_id: topic.topic_id,
+                    mastery_score: score,
+                  })
                 }
 
                 controller.enqueue(emit({ t: 'grade', score: input.score, rationale: input.rationale, topic: input.topic_name }))

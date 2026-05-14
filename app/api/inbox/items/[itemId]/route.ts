@@ -1,4 +1,5 @@
 import { createClient, createServiceClient } from '@/lib/supabase/server'
+import { requireOwnedCourse } from '@/lib/authz'
 import { NextResponse } from 'next/server'
 
 type Params = { params: Promise<{ itemId: string }> }
@@ -24,9 +25,15 @@ export async function DELETE(_req: Request, { params }: Params) {
   if (!item) return NextResponse.json({ error: 'Not found' }, { status: 404 })
 
   // Delete inbox item (material cascades if FK set, otherwise delete separately)
-  await service.from('inbox_items').delete().eq('inbox_item_id', itemId)
+  const { error: inboxDeleteError } = await service
+    .from('inbox_items')
+    .delete()
+    .eq('inbox_item_id', itemId)
+    .eq('user_id', user.id)
+  if (inboxDeleteError) return NextResponse.json({ error: inboxDeleteError.message }, { status: 500 })
   if (item.material_id) {
-    await service.from('materials').delete().eq('material_id', item.material_id).eq('user_id', user.id)
+    const { error: materialDeleteError } = await service.from('materials').delete().eq('material_id', item.material_id).eq('user_id', user.id)
+    if (materialDeleteError) return NextResponse.json({ error: materialDeleteError.message }, { status: 500 })
   }
 
   return NextResponse.json({ ok: true })
@@ -44,6 +51,8 @@ export async function PATCH(request: Request, { params }: Params) {
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   const service = createServiceClient()
+  const course = await requireOwnedCourse(user.id, courseId)
+  if (!course) return NextResponse.json({ error: 'Course not found' }, { status: 404 })
 
   const { data: item } = await service
     .from('inbox_items')
@@ -55,17 +64,19 @@ export async function PATCH(request: Request, { params }: Params) {
   if (!item) return NextResponse.json({ error: 'Not found' }, { status: 404 })
 
   // Update inbox item
-  await service.from('inbox_items').update({
+  const { error: inboxError } = await service.from('inbox_items').update({
     classification_status: 'classified',
     course_id: courseId,
-  }).eq('inbox_item_id', itemId)
+  }).eq('inbox_item_id', itemId).eq('user_id', user.id)
+  if (inboxError) return NextResponse.json({ error: inboxError.message }, { status: 500 })
 
   // Update material if it exists
   if (item.material_id) {
-    await service.from('materials').update({
+    const { error: materialError } = await service.from('materials').update({
       course_id: courseId,
       processing_status: 'processed',
-    }).eq('material_id', item.material_id)
+    }).eq('material_id', item.material_id).eq('user_id', user.id)
+    if (materialError) return NextResponse.json({ error: materialError.message }, { status: 500 })
   }
 
   return NextResponse.json({ ok: true })

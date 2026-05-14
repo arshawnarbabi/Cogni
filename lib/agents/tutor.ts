@@ -1,5 +1,6 @@
 import { createServiceClient } from '@/lib/supabase/server'
 import { readWikiFile } from '@/lib/wiki'
+import { dateKeyInTimeZone } from '@/lib/time'
 
 export type TutorMode = 'answer' | 'teach' | 'focus'
 
@@ -180,12 +181,13 @@ export async function createSession(
   mode: TutorMode
 ): Promise<string> {
   const service = createServiceClient()
-  const { data: newSession } = await service
+  const { data: newSession, error } = await service
     .from('session_log')
     .insert({ user_id: userId, course_id: courseId, mode })
     .select('session_id')
     .single()
 
+  if (error || !newSession) throw new Error(error?.message ?? 'Failed to create session')
   return newSession!.session_id
 }
 
@@ -197,7 +199,12 @@ export async function getOrCreateSession(
   const service = createServiceClient()
 
   // Check for an existing open session today
-  const today = new Date().toISOString().split('T')[0]
+  const { data: userRow } = await service
+    .from('users')
+    .select('timezone')
+    .eq('user_id', userId)
+    .single()
+  const today = dateKeyInTimeZone(new Date(), userRow?.timezone ?? 'UTC')
   const { data: existing } = await service
     .from('session_log')
     .select('session_id')
@@ -234,6 +241,17 @@ export async function getSessionMessages(sessionId: string) {
   return data ?? []
 }
 
+export async function getOwnedSessionMessages(sessionId: string, userId: string) {
+  const service = createServiceClient()
+  const { data } = await service
+    .from('session_messages')
+    .select('role, content, inline_card')
+    .eq('session_id', sessionId)
+    .eq('user_id', userId)
+    .order('created_at', { ascending: true })
+  return data ?? []
+}
+
 export async function saveMessage(
   sessionId: string,
   userId: string,
@@ -242,6 +260,13 @@ export async function saveMessage(
   inlineCard?: object | object[] | null,
 ) {
   const service = createServiceClient()
+  const { data: session } = await service
+    .from('session_log')
+    .select('session_id')
+    .eq('session_id', sessionId)
+    .eq('user_id', userId)
+    .single()
+  if (!session) throw new Error('Session not found')
   const hasCard = inlineCard != null && (!Array.isArray(inlineCard) || inlineCard.length > 0)
   await service.from('session_messages').insert({
     session_id: sessionId,
@@ -269,7 +294,11 @@ export async function autoNameSession(sessionId: string, userId: string, firstEx
     const name = msg.content[0].type === 'text' ? msg.content[0].text.trim() : null
     if (name) {
       const service = createServiceClient()
-      await service.from('session_log').update({ name }).eq('session_id', sessionId)
+      await service
+        .from('session_log')
+        .update({ name })
+        .eq('session_id', sessionId)
+        .eq('user_id', userId)
     }
   } catch {
     // Non-critical

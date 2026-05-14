@@ -776,7 +776,7 @@ export function QuizSession({ courseId, courseName, topicOptions, initialQuestio
       setSummary({ correctCount: 0, scorePct: 0, missedTopics: [], masteryUpdates: [], results: [] })
       setPhase('results')
     }
-  }, [courseId, examMode, configState.topicFilters, startTime, onComplete])
+  }, [courseId, examMode, configState.topicFilters, startTime, onComplete, normalizedInitial])
 
   useEffect(() => {
     onExpireRef.current = () => submitAnswers(userAnswers, questions)
