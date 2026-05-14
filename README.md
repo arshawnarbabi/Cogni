@@ -6,6 +6,7 @@
   <img src="https://img.shields.io/badge/TypeScript-5-3178C6" alt="TypeScript" />
   <img src="https://img.shields.io/badge/Supabase-PostgreSQL-3ECF8E" alt="Supabase" />
   <img src="https://img.shields.io/badge/Claude-Sonnet%204.6-CC785C" alt="Claude" />
+  <img src="https://img.shields.io/badge/status-beta-F59E0B" alt="Beta" />
   <a href="https://trycogni.vercel.app/"><img src="https://img.shields.io/badge/website-trycogni.vercel.app-1D4ED8" alt="Website" /></a>
   <a href="https://vercel.com/new/clone?repository-url=https://github.com/s24b/Cogni"><img src="https://vercel.com/button" alt="Deploy with Vercel" /></a>
 </p>
@@ -13,6 +14,8 @@
 <br />
 
 Cogni decides what to study, when to study, and how — so you just show up. Feed it your syllabi, lecture notes, past exams, and course materials. It classifies and processes everything automatically, extracts your topics, maps your professor's grading weights, and generates a prioritized study plan every morning based on your current mastery and upcoming exams. The tutor pulls from your actual course materials. Flashcards are scheduled by FSRS at the card and topic level. Study blocks land in your Google Calendar. All you do is study. BYOK, self-hosted on Vercel + Supabase.
+
+> **Beta:** Cogni is under active development. Expect rough edges, verify important study data, and test thoroughly before relying on it for critical coursework.
 
 <br />
 
