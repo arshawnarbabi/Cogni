@@ -2,17 +2,51 @@ name: Keep Supabase Active
 
 on:
   schedule:
-    - cron: '0 0 * * 1,4'  # Monday and Thursday at midnight UTC
-  workflow_dispatch:         # allow manual trigger from GitHub Actions tab
+    - cron: '0 12 * * *'   # Every day at noon UTC
+  workflow_dispatch:        # Allow manual trigger from GitHub Actions tab
 
 jobs:
   ping:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write       # Needed for the keepalive commit step
+
     steps:
-      - name: Ping Supabase REST API
+      - name: Validate secrets
+        run: |
+          if [ -z "${{ secrets.SUPABASE_URL }}" ]; then
+            echo "ERROR: SUPABASE_URL secret is not set"
+            exit 1
+          fi
+          if [ -z "${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" ]; then
+            echo "ERROR: SUPABASE_SERVICE_ROLE_KEY secret is not set"
+            exit 1
+          fi
+
+      - name: Ping Supabase database
         run: |
           STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
             "${{ secrets.SUPABASE_URL }}/rest/v1/users?select=user_id&limit=1" \
-            -H "apikey: ${{ secrets.SUPABASE_ANON_KEY }}" \
-            -H "Authorization: Bearer ${{ secrets.SUPABASE_ANON_KEY }}")
+            -H "apikey: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
+            -H "Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}")
           echo "Supabase responded with HTTP $STATUS"
+          if [ "$STATUS" != "200" ]; then
+            echo "ERROR: Expected HTTP 200 but got $STATUS"
+            exit 1
+          fi
+          echo "Keepalive ping successful"
+
+      # Commits a tiny dated file so the repo counts as active.
+      # This prevents GitHub from disabling scheduled workflows after 60 days
+      # of no repository activity — the root cause of recurring keepalive failures.
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Commit keepalive timestamp
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > .github/keepalive
+          git add .github/keepalive
+          git diff --staged --quiet || git commit -m "chore: keepalive $(date -u +%Y-%m-%d)"
+          git push
