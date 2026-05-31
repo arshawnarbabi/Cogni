@@ -6,7 +6,7 @@
   <img src="https://img.shields.io/badge/TypeScript-5-3178C6" alt="TypeScript" />
   <img src="https://img.shields.io/badge/Supabase-PostgreSQL-3ECF8E" alt="Supabase" />
   <img src="https://img.shields.io/badge/Claude-Sonnet%204.6-CC785C" alt="Claude" />
-  <a href="https://trycogni.vercel.app/"><img src="https://img.shields.io/badge/website-trycogni.vercel.app-1D4ED8" alt="Website" /></a>
+  <a href="https://trycogni.arshawnarbabi.com/"><img src="https://img.shields.io/badge/website-trycogni.arshawnarbabi.com-1D4ED8" alt="Website" /></a>
   <a href="https://vercel.com/new/clone?repository-url=https://github.com/s24b/Cogni"><img src="https://vercel.com/button" alt="Deploy with Vercel" /></a>
 </p>
 
