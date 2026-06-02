@@ -3,6 +3,7 @@
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { motion, AnimatePresence } from 'framer-motion'
+import { toast } from 'sonner'
 import { X, ArrowRight } from '@phosphor-icons/react'
 
 type Card = {
@@ -25,12 +26,23 @@ function FlipCard({ card, onRate }: { card: Card; onRate: (r: 1|2|3|4) => void }
 
   async function handleRate(r: 1|2|3|4) {
     setRating(r)
-    await fetch('/api/cards/review', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ cardId: card.card_id, rating: r }),
-    })
-    onRate(r)
+    try {
+      const res = await fetch('/api/cards/review', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cardId: card.card_id, rating: r }),
+      })
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}))
+        console.error('[review] save failed', res.status, body)
+        toast.error(`Review didn't save (${res.status}). Your FSRS scheduling may be stale.`)
+      }
+    } catch (e) {
+      console.error('[review] network error', e)
+      toast.error("Couldn't reach server to save your review.")
+    } finally {
+      onRate(r)
+    }
   }
 
   return (

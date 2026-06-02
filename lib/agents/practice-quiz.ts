@@ -120,7 +120,19 @@ Schema for each question:
 
   const raw = response.content[0].type === 'text' ? response.content[0].text.trim() : '[]'
   const stripped = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')
-  return JSON.parse(stripped) as QuizQuestion[]
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(stripped)
+  } catch {
+    throw new Error('Quiz generation returned invalid JSON')
+  }
+  const arr = Array.isArray(parsed)
+    ? parsed
+    : (parsed && Array.isArray((parsed as { questions?: unknown }).questions)
+        ? (parsed as { questions: unknown[] }).questions
+        : [])
+  if (arr.length === 0) throw new Error('Quiz generation returned no questions')
+  return arr.slice(0, questionCount) as QuizQuestion[]
 }
 
 // ── Generate simulated exam questions (Sonnet) ────────────────────────────────
@@ -135,18 +147,18 @@ export async function generateSimulatedExam(
 
   const service = createServiceClient()
 
-  // Get exam info for timing + past exam question counts
-  const { data: exams } = await service
+  // Get exam info for timing — nearest upcoming exam (the one being prepared for)
+  const today = new Date().toISOString().split('T')[0]
+  const { data: upcomingExams } = await service
     .from('exams')
-    .select('date, duration_minutes, grade_weight')
+    .select('date, duration_minutes')
     .eq('course_id', courseId)
     .eq('user_id', userId)
-    .order('date', { ascending: false })
-    .limit(3)
+    .gte('date', today)
+    .order('date', { ascending: true })
+    .limit(1)
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const upcomingExam = (exams ?? []).find((e: any) => new Date(e.date) >= new Date())
-  const durationMinutes = upcomingExam?.duration_minutes ?? 60
+  const durationMinutes = upcomingExams?.[0]?.duration_minutes ?? 60
   const questionCount = 20
 
   // Get professor wiki

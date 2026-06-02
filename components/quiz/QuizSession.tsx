@@ -809,8 +809,8 @@ export function QuizSession({ courseId, courseName, topicOptions, initialQuestio
         }),
       })
       const data = await res.json() as { questions: QuizQuestion[]; durationMinutes?: number; error?: string }
-      if (data.error) {
-        alert(data.error)
+      if (!res.ok || !Array.isArray(data.questions)) {
+        alert(data.error ?? 'Could not generate questions. Try again.')
         setLoadingConfig(false)
         return
       }
@@ -821,7 +821,7 @@ export function QuizSession({ courseId, courseName, topicOptions, initialQuestio
       setStartTime(Date.now())
       setPhase('quiz')
     } catch {
-      // stay on config
+      alert('Could not generate questions. Try again.')
     } finally {
       setLoadingConfig(false)
     }

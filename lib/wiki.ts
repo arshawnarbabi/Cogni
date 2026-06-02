@@ -39,6 +39,11 @@ export async function writeWikiFile(
 }
 
 const LOG_FILE = 'log.md'
+// Dedicated marker for single-line append rows so re-materialization never picks
+// up full-blob snapshot rows (writeWikiFile / user PATCH both write file_path
+// 'log.md' rows whose content is the WHOLE log) — joining those would duplicate
+// the entire history on every subsequent append.
+const LOG_APPEND_AGENT = 'log_append'
 
 // Renders the log.md storage blob from append-only entry rows (one row per
 // entry) ordered oldest-first, matching the historical newline-joined format.
@@ -69,18 +74,19 @@ export async function appendToLog(userId: string, entry: string): Promise<void> 
     user_id: userId,
     file_path: LOG_FILE,
     content: line,
-    triggered_by_agent: 'system',
+    triggered_by_agent: LOG_APPEND_AGENT,
   })
 
-  // Re-materialize the storage blob from all committed entry rows so the
-  // file-based readers stay consistent. Read immediately before upload so the
-  // blob reflects the latest committed entries, including those from concurrent
-  // appends.
+  // Re-materialize the storage blob from the committed append-entry rows ONLY
+  // (LOG_APPEND_AGENT) so full-blob snapshot rows from writeWikiFile/PATCH can't
+  // be folded in and duplicate the history. Read immediately before upload so the
+  // blob reflects the latest committed entries, including concurrent appends.
   const { data: rows } = await service
     .from('wiki_versions')
     .select('content')
     .eq('user_id', userId)
     .eq('file_path', LOG_FILE)
+    .eq('triggered_by_agent', LOG_APPEND_AGENT)
     .order('created_at', { ascending: true })
 
   const blob = renderLogBlob(rows ?? [{ content: line }]).trimStart()

@@ -10,8 +10,11 @@ import type { ActiveNudge } from '@/lib/agents/nudge'
 
 export const dynamic = 'force-dynamic'
 
-function greeting(name: string) {
-  const h = new Date().getHours()
+function greeting(name: string, timeZone: string) {
+  // Hour in the user's timezone, not the server's (UTC on Vercel).
+  const h = Number(
+    new Intl.DateTimeFormat('en-US', { timeZone, hour: 'numeric', hour12: false }).format(new Date())
+  ) % 24
   const time = h < 12 ? 'morning' : h < 17 ? 'afternoon' : 'evening'
   return `Good ${time}, ${name}`
 }
@@ -153,7 +156,7 @@ export default async function TodayPage() {
 
   return (
     <TodayClient
-      greeting={greeting(userRow?.display_name ?? 'there')}
+      greeting={greeting(userRow?.display_name ?? 'there', timeZone)}
       tasks={tasks}
       upcomingSchedule={upcomingSchedule}
       pendingCount={inboxPending?.length ?? 0}

@@ -15,8 +15,8 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'File too large (max 25 MB).' }, { status: 413 })
   }
   const ext = file.name.split('.').pop()?.toLowerCase() ?? ''
-  if (!['pdf', 'txt', 'md', 'docx'].includes(ext)) {
-    return NextResponse.json({ error: 'Unsupported file type. Upload a PDF, TXT, MD, or DOCX.' }, { status: 400 })
+  if (!['pdf', 'txt', 'md'].includes(ext)) {
+    return NextResponse.json({ error: 'Unsupported file type. Upload a PDF, TXT, or MD.' }, { status: 400 })
   }
   if (!await hasExpectedFileSignature(file, ext)) {
     return NextResponse.json({ error: 'File contents do not match the file extension.' }, { status: 400 })

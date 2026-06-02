@@ -1,4 +1,5 @@
 import { createClient, createServiceClient } from '@/lib/supabase/server'
+import { dateKeyInTimeZone } from '@/lib/time'
 import { NextResponse } from 'next/server'
 
 export async function POST(
@@ -108,7 +109,13 @@ export async function DELETE(
   const topicIds = (topics ?? []).map((t: { topic_id: string }) => t.topic_id)
 
   if (topicIds.length > 0) {
-    const today = new Date().toISOString().split('T')[0]
+    const { data: userRow } = await service
+      .from('users')
+      .select('timezone')
+      .eq('user_id', user.id)
+      .single()
+    const timeZone = userRow?.timezone ?? 'UTC'
+    const today = dateKeyInTimeZone(new Date(), timeZone)
     await service
       .from('flashcards')
       .update({ fsrs_next_review_date: today })

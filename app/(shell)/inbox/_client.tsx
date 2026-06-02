@@ -288,12 +288,23 @@ export function InboxClient({ items: initialItems, courses }: { items: InboxItem
       updateItem(stagedId, { done: true, awaitingDueDate: false })
       return
     }
-    await fetch('/api/assignments', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ course_id: item.courseId, name: item.name, due_date: date }),
-    })
-    updateItem(stagedId, { done: true, awaitingDueDate: false })
+    let res: Response
+    try {
+      res = await fetch('/api/assignments', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ course_id: item.courseId, name: item.name, due_date: date }),
+      })
+    } catch {
+      updateItem(stagedId, { error: 'Could not save the assignment. Check your connection and try again.' })
+      return
+    }
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({} as { error?: string }))
+      updateItem(stagedId, { error: j.error ?? 'Could not save the assignment. Try again.' })
+      return
+    }
+    updateItem(stagedId, { done: true, awaitingDueDate: false, error: undefined })
     setTimeout(() => setStaged(prev => prev.filter(s => s.id !== stagedId)), 1500)
   }
 

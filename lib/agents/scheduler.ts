@@ -459,10 +459,11 @@ export async function generateUpcomingPreview(userId: string): Promise<void> {
 
   const assignmentsByDate = new Map<string, { assignment_id: string; name: string; due_date: string; course_id: string }[]>()
   for (const a of (assignmentsResult.data ?? []) as { assignment_id: string; name: string; due_date: string; course_id: string }[]) {
-    // due_date is a timestamptz, so normalize to the user's local date key before
-    // grouping. dateStrs are derived from dateKeyInTimeZone in the same timezone, so
-    // this keeps assignments near a UTC day boundary on the correct local preview day.
-    const dueKey = dateKeyInTimeZone(new Date(a.due_date), timeZone)
+    // due_date is a date-only value stored as UTC-midnight timestamptz (the picker
+    // and inbox agent both write a bare YYYY-MM-DD). Group by its date portion so it
+    // aligns with dateStrs (and with how due cards are binned by raw fsrs_next_review_date).
+    // Re-zoning with dateKeyInTimeZone would shift the day for non-UTC users.
+    const dueKey = a.due_date.split('T')[0]
     const arr = assignmentsByDate.get(dueKey) ?? []
     arr.push(a) // keep original a.due_date for display
     assignmentsByDate.set(dueKey, arr)

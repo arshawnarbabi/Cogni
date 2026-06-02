@@ -108,28 +108,51 @@ function WikiFileRow({
   const [draft, setDraft] = useState(file.content)
   const [saving, setSaving] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
+  const [error, setError] = useState<string | null>(null)
   const router = useRouter()
   const severity = severityFor(file.filename)
 
   async function save() {
     setSaving(true)
-    await fetch('/api/wiki', {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ filename: file.filename, content: draft }),
-    })
-    setSaving(false)
-    setEditing(false)
-    onSaved()
+    setError(null)
+    try {
+      const res = await fetch('/api/wiki', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filename: file.filename, content: draft }),
+      })
+      if (!res.ok) {
+        const json = await res.json().catch(() => ({}))
+        setError(json.error ?? 'Failed to save. Your changes were not saved.')
+        setSaving(false)
+        return
+      }
+      setSaving(false)
+      setEditing(false)
+      onSaved()
+    } catch {
+      setError('Network error. Your changes were not saved.')
+      setSaving(false)
+    }
   }
 
   async function handleDelete() {
-    await fetch('/api/wiki', {
-      method: 'DELETE',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ filename: file.filename }),
-    })
-    router.refresh()
+    setError(null)
+    try {
+      const res = await fetch('/api/wiki', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filename: file.filename }),
+      })
+      if (!res.ok) {
+        const json = await res.json().catch(() => ({}))
+        setError(json.error ?? 'Failed to delete.')
+        return
+      }
+      router.refresh()
+    } catch {
+      setError('Network error. Could not delete.')
+    }
   }
 
   const isProfessor = file.filename.startsWith('professor_')
@@ -208,6 +231,7 @@ function WikiFileRow({
               Cancel
             </button>
           </div>
+          {error && <p className="text-xs text-destructive">{error}</p>}
         </div>
       )}
 
@@ -219,6 +243,8 @@ function WikiFileRow({
           onCancel={() => setConfirmDelete(false)}
         />
       )}
+
+      {error && !editing && <p className="text-xs text-destructive">{error}</p>}
     </div>
   )
 }

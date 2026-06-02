@@ -3,6 +3,10 @@ import { NextResponse } from 'next/server'
 
 const BUCKET = 'wiki'
 const HIDDEN = new Set(['index.md'])
+// Machine-generated, append-only activity log. Shown read-only in the UI but not
+// user-editable: editing it would insert a full-blob row that corrupts the
+// append-based re-materialization in lib/wiki.ts appendToLog.
+const READ_ONLY = new Set(['log.md'])
 
 function isSafeFilename(name: unknown): name is string {
   return typeof name === 'string'
@@ -51,7 +55,7 @@ export async function PATCH(request: Request) {
   if (content.length > 200_000) {
     return NextResponse.json({ error: 'content too large' }, { status: 413 })
   }
-  if (HIDDEN.has(filename)) {
+  if (HIDDEN.has(filename) || READ_ONLY.has(filename)) {
     return NextResponse.json({ error: 'Cannot edit this file' }, { status: 403 })
   }
 
@@ -81,7 +85,7 @@ export async function DELETE(request: Request) {
 
   const { filename } = await request.json()
   if (!isSafeFilename(filename)) return NextResponse.json({ error: 'filename required' }, { status: 400 })
-  if (HIDDEN.has(filename)) {
+  if (HIDDEN.has(filename) || READ_ONLY.has(filename)) {
     return NextResponse.json({ error: 'Cannot delete this file' }, { status: 403 })
   }
 

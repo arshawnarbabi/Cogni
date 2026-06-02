@@ -23,6 +23,7 @@ export function ApiKeyField({
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
   const [editing, setEditing] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     fetch(`/api/user/keys?key=${keyName}`)
@@ -37,29 +38,43 @@ export function ApiKeyField({
   async function save() {
     if (!input.trim()) return
     setSaving(true)
+    setError(null)
     try {
-      await fetch('/api/user/keys', {
+      const res = await fetch('/api/user/keys', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ key: keyName, value: input.trim() }),
       })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        setError(data.error ?? 'Failed to save key.')
+        return
+      }
       setIsSet(true)
       setPreview(`••••${input.trim().slice(-4)}`)
       setInput('')
       setEditing(false)
       setSaved(true)
       setTimeout(() => setSaved(false), 2000)
+    } catch {
+      setError('Network error. Your key was not saved.')
     } finally {
       setSaving(false)
     }
   }
 
   async function remove() {
-    await fetch('/api/user/keys', {
+    setError(null)
+    const res = await fetch('/api/user/keys', {
       method: 'DELETE',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ key: keyName }),
     })
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}))
+      setError(data.error ?? 'Failed to remove key.')
+      return
+    }
     setIsSet(false)
     setPreview(null)
     setEditing(false)
@@ -106,7 +121,7 @@ export function ApiKeyField({
             <input
               type={show ? 'text' : 'password'}
               value={input}
-              onChange={e => setInput(e.target.value)}
+              onChange={e => { setInput(e.target.value); setError(null) }}
               onKeyDown={e => e.key === 'Enter' && save()}
               placeholder={placeholder}
               className="w-full rounded-lg border border-border bg-card px-3 py-2 pr-10 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring font-mono"
@@ -137,6 +152,8 @@ export function ApiKeyField({
           )}
         </div>
       )}
+
+      {error && <p className="text-[11px] text-destructive">{error}</p>}
 
       {learnMoreUrl && (
         <a

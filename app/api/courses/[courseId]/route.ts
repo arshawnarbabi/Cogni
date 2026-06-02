@@ -39,11 +39,26 @@ export async function DELETE(
     if (storageError) return NextResponse.json({ error: storageError.message }, { status: 500 })
   }
 
-  // Delete professor wiki file
+  // Delete professor wiki file — only if no other course of this user still
+  // references this professor. Professors persist across semesters and can be
+  // shared by multiple courses (courses.professor_id is `on delete set null`),
+  // so removing the shared wiki unconditionally would wipe the profile other
+  // active/archived courses still use. Mirror the archive route's keepProfessor
+  // guard, and perform the check BEFORE the course row is deleted below.
   if (course.professor_id) {
-    await service.storage
-      .from('wiki')
-      .remove([`${user.id}/professor_${course.professor_id}.md`])
+    const { data: otherCourses } = await service
+      .from('courses')
+      .select('course_id')
+      .eq('professor_id', course.professor_id)
+      .eq('user_id', user.id)
+      .neq('course_id', courseId)
+      .limit(1)
+
+    if (!otherCourses || otherCourses.length === 0) {
+      await service.storage
+        .from('wiki')
+        .remove([`${user.id}/professor_${course.professor_id}.md`])
+    }
   }
 
   // Delete course files from storage (course_files DB rows cascade with the course,

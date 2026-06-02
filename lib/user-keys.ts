@@ -1,6 +1,6 @@
 import { createServiceClient } from '@/lib/supabase/server'
 import { createClient } from '@/lib/supabase/server'
-import { getUserSecret, setUserSecret } from '@/lib/vault'
+import { getUserSecret, setUserSecret, deleteUserSecret } from '@/lib/vault'
 
 const ALLOWED_KEYS = new Set(['openai_key'])
 
@@ -29,7 +29,7 @@ export async function setUserKey(userId: string, keyName: string, value: string)
 
 export async function deleteUserKey(userId: string, keyName: string): Promise<void> {
   if (!ALLOWED_KEYS.has(keyName)) return
-  await setUserSecret(userId, keyName, '')
+  await deleteUserSecret(userId, keyName)
 
   const service = createServiceClient()
   await service.from('user_keys').delete().eq('user_id', userId).eq('key_name', keyName)

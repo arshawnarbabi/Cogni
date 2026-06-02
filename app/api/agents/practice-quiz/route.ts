@@ -44,6 +44,8 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'Missing courseId or courseName' }, { status: 400 })
   }
 
+  const count = Math.min(50, Math.max(1, Math.floor(Number(questionCount)) || 10))
+
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
@@ -51,8 +53,8 @@ export async function POST(request: Request) {
   if (!ownedCourse) return NextResponse.json({ error: 'Course not found' }, { status: 404 })
 
   if (process.env.MOCK_AGENTS === 'true' && process.env.NODE_ENV !== 'production') {
-    const count = Math.min(questionCount ?? 3, MOCK_QUESTIONS.length)
-    return NextResponse.json({ questions: MOCK_QUESTIONS.slice(0, count) })
+    const mockCount = Math.min(count, MOCK_QUESTIONS.length)
+    return NextResponse.json({ questions: MOCK_QUESTIONS.slice(0, mockCount) })
   }
 
   try {
@@ -61,7 +63,7 @@ export async function POST(request: Request) {
       courseId,
       courseName,
       format,
-      questionCount,
+      count,
       topicFilter,
       difficulty,
     )
