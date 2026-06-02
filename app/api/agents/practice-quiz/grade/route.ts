@@ -4,6 +4,14 @@ import { gradeAndRecord, type QuizQuestion } from '@/lib/agents/practice-quiz'
 import { requireOwnedCourse } from '@/lib/authz'
 import { NextResponse } from 'next/server'
 
+// Grading short-answer questions makes one model call per question; bound the
+// runtime so a large payload can't hold the function open indefinitely.
+export const maxDuration = 60
+
+// Hard cap on questions graded per request — defends against a client sending a
+// huge `questions` array to fan out thousands of model calls / DB writes.
+const MAX_QUESTIONS = 50
+
 export async function POST(request: Request) {
   const body = await request.json() as {
     courseId: string
@@ -18,6 +26,9 @@ export async function POST(request: Request) {
 
   if (!courseId || !questions?.length) {
     return NextResponse.json({ error: 'Missing required fields' }, { status: 400 })
+  }
+  if (questions.length > MAX_QUESTIONS) {
+    return NextResponse.json({ error: `Too many questions (max ${MAX_QUESTIONS})` }, { status: 413 })
   }
 
   const supabase = await createClient()

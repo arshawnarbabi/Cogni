@@ -1,6 +1,12 @@
 import { createServerClient } from '@supabase/ssr'
 import { NextResponse, type NextRequest } from 'next/server'
 
+// Next.js 16.2 middleware convention (the file/export are named `proxy`, which
+// replaced `middleware`). Refreshes the Supabase session cookie and gates page
+// navigation. API routes are intentionally EXCLUDED from the matcher: they
+// authenticate themselves (getUser / CRON_SECRET). Matching /api here would
+// redirect the unauthenticated cron GETs (scheduler/nudge) to /auth and turn
+// API 401s into 307 redirects.
 export async function proxy(request: NextRequest) {
   let supabaseResponse = NextResponse.next({ request })
 
@@ -25,7 +31,9 @@ export async function proxy(request: NextRequest) {
     }
   )
 
-  // getSession() reads from the cookie — no network call, no latency
+  // getSession() reads from the cookie — no network call, no latency. This is a
+  // redirect gate only; every protected page additionally calls getUser() server
+  // side, so authorization never relies on the (unverified) cookie session here.
   const { data: { session } } = await supabase.auth.getSession()
   const user = session?.user
 
@@ -50,6 +58,8 @@ export async function proxy(request: NextRequest) {
 
 export const config = {
   matcher: [
-    '/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)',
+    // Page routes only — exclude /api (self-authenticating + cron), Next internals,
+    // and static assets.
+    '/((?!api|_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)',
   ],
 }

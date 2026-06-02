@@ -2,11 +2,27 @@ import { createServiceClient } from '@/lib/supabase/server'
 
 const BUCKET = 'wiki'
 
+// Defense-in-depth: wiki filenames must be a single safe path segment. Blocks
+// path traversal / cross-prefix writes from any caller (e.g. a prompt-injected
+// agent tool) reaching the service-role storage client. Matches the guard the
+// user-facing /api/wiki route already enforces.
+const WIKI_NAME_RE = /^[a-zA-Z0-9._-]+$/
+function isSafeWikiName(filename: string): boolean {
+  return typeof filename === 'string'
+    && filename.length > 0
+    && filename.length <= 128
+    && !filename.includes('/')
+    && !filename.includes('\\')
+    && !filename.includes('..')
+    && WIKI_NAME_RE.test(filename)
+}
+
 function storagePath(userId: string, filename: string) {
   return `${userId}/${filename}`
 }
 
 export async function readWikiFile(userId: string, filename: string): Promise<string | null> {
+  if (!isSafeWikiName(filename)) return null
   const service = createServiceClient()
   const { data, error } = await service.storage
     .from(BUCKET)
@@ -22,6 +38,7 @@ export async function writeWikiFile(
   content: string,
   triggeredByAgent?: string
 ): Promise<void> {
+  if (!isSafeWikiName(filename)) throw new Error('Unsafe wiki filename')
   const service = createServiceClient()
 
   await service.storage

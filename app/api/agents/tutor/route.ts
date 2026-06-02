@@ -583,10 +583,16 @@ export async function POST(request: Request) {
                 toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: 'Chart rendered inline in the chat.' })
               } else if (block.name === 'write_wiki_pattern') {
                 const input = block.input as { file: string; insight: string }
-                const existing = await readWikiFile(user.id, input.file) ?? ''
+                // The model-supplied `file` is untrusted: course material / attachments
+                // can prompt-inject a call to this tool, and the schema enum is only a
+                // hint (not runtime-enforced). This tool exists solely to record student
+                // learning patterns, so hard-target learning_profile.md and ignore `file`
+                // — preventing writes to professor_*.md / index.md / log.md or any path.
+                const target = 'learning_profile.md'
+                const existing = await readWikiFile(user.id, target) ?? ''
                 const timestamp = new Date().toISOString().split('T')[0]
                 const updated = existing.trimEnd() + `\n\n- [${timestamp}] ${input.insight}`
-                await writeWikiFile(user.id, input.file, updated, 'tutor')
+                await writeWikiFile(user.id, target, updated, 'tutor')
                 toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: 'Pattern recorded.' })
               }
             }
