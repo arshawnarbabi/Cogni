@@ -50,7 +50,7 @@ export async function POST(request: Request) {
   const ownedCourse = await requireOwnedCourse(user.id, courseId)
   if (!ownedCourse) return NextResponse.json({ error: 'Course not found' }, { status: 404 })
 
-  if (process.env.NEXT_PUBLIC_MOCK_AGENTS === 'true') {
+  if (process.env.MOCK_AGENTS === 'true' && process.env.NODE_ENV !== 'production') {
     const count = Math.min(questionCount ?? 3, MOCK_QUESTIONS.length)
     return NextResponse.json({ questions: MOCK_QUESTIONS.slice(0, count) })
   }

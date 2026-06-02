@@ -16,7 +16,7 @@ export async function GET(request: Request) {
 
   const files = await listCourseFiles(user.id, courseId)
   const withUrls = await Promise.all(
-    files.map(async f => ({ ...f, url: await getFileUrl(user.id, f.file_id) }))
+    files.map(async f => ({ ...f, url: await getFileUrl(user.id, f.file_id).catch(() => null) }))
   )
   return NextResponse.json({ files: withUrls })
 }

@@ -40,3 +40,21 @@ export async function setUserSecret(userId: string, secretName: string, value: s
   })
   if (error) throw new Error(error.message)
 }
+
+/** Permanently remove a named per-user secret from the Vault. Idempotent. */
+export async function deleteUserSecret(userId: string, secretName: string): Promise<void> {
+  if (!SECRET_NAME_RE.test(secretName)) return
+  const service = createServiceClient()
+  const { error } = await service.rpc('delete_user_secret', {
+    p_user_id: userId,
+    p_secret_name: secretName,
+  })
+  if (error) throw new Error(error.message)
+}
+
+/** Permanently remove the user's Anthropic API key secret from the Vault. Idempotent. */
+export async function deleteUserApiKey(userId: string): Promise<void> {
+  const service = createServiceClient()
+  const { error } = await service.rpc('delete_user_api_key', { p_user_id: userId })
+  if (error) throw new Error(error.message)
+}

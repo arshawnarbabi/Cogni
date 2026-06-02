@@ -71,20 +71,29 @@ export async function POST(request: Request) {
   if (file) {
     const { data: existing } = await service
       .from('materials')
-      .select('material_id, processing_status')
+      .select('material_id, processing_status, storage_path, uploaded_at')
       .eq('user_id', user.id)
       .eq('filename', filename)
       .limit(1)
 
     if (existing && existing.length > 0) {
-      const stuck = existing[0].processing_status === 'pending' || existing[0].processing_status === 'failed'
+      const PROCESSING_TIMEOUT_MS = 5 * 60 * 1000 // 5 min
+      const status = existing[0].processing_status
+      const isStaleProcessing =
+        status === 'processing' &&
+        Date.now() - new Date(existing[0].uploaded_at).getTime() > PROCESSING_TIMEOUT_MS
+      const stuck = status === 'pending' || status === 'failed' || isStaleProcessing
       if (!stuck) {
         return NextResponse.json(
           { error: `"${filename}" has already been uploaded.` },
           { status: 409 }
         )
       }
-      // Stuck record — delete it so this upload can proceed cleanly
+      // Stuck record — remove the orphaned storage object and delete the DB row
+      // so this upload can proceed cleanly.
+      if (existing[0].storage_path) {
+        await service.storage.from('materials').remove([existing[0].storage_path])
+      }
       await service
         .from('materials')
         .delete()
@@ -153,6 +162,13 @@ export async function POST(request: Request) {
     await service
       .from('materials')
       .update({ processing_status: 'failed' })
+      .eq('material_id', material.material_id)
+      .eq('user_id', user.id)
+    // Flip the inbox item to a recoverable status so the UI exposes retry/dismiss
+    // (a 'pending' item shows no recovery actions, stranding the user).
+    await service
+      .from('inbox_items')
+      .update({ classification_status: 'failed' })
       .eq('material_id', material.material_id)
       .eq('user_id', user.id)
     return NextResponse.json(

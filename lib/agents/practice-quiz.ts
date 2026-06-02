@@ -65,14 +65,14 @@ export async function generatePracticeQuiz(
   const masteryMap = new Map<string, number>()
   for (const m of mastery ?? []) {
     const t = m.topics as { topic_id: string; name: string } | null
-    if (t) masteryMap.set(t.name, Number(m.mastery_score ?? 0))
+    if (t) masteryMap.set(t.topic_id, Number(m.mastery_score ?? 0))
   }
 
   const topicList = (allTopics ?? [])
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     .filter((t: any) => !topicFilter || t.name.toLowerCase().includes(topicFilter.toLowerCase()))
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    .map((t: any) => `- ${t.name} (mastery: ${Math.round((masteryMap.get(t.name) ?? 0) * 100)}%)`)
+    .map((t: any) => `- ${t.name} (mastery: ${Math.round((masteryMap.get(t.topic_id) ?? 0) * 100)}%)`)
     .join('\n')
 
   const formatInstruction =
@@ -214,9 +214,11 @@ Schema for each question:
 
   const raw = response.content[0].type === 'text' ? response.content[0].text.trim() : '[]'
   const stripped = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')
-  const questions = JSON.parse(stripped) as QuizQuestion[]
+  const parsed = JSON.parse(stripped)
+  const questions = (Array.isArray(parsed) ? parsed : []) as QuizQuestion[]
+  if (questions.length === 0) throw new Error('Simulated exam generation returned no questions')
 
-  return { questions, durationMinutes }
+  return { questions: questions.slice(0, questionCount), durationMinutes }
 }
 
 // ── Grade results + update mastery + write to DB ──────────────────────────────
@@ -315,9 +317,15 @@ Return JSON only: {"score": 0.0-1.0, "correct": true/false, "feedback": "one sen
   const resolvedTopics: { topicName: string; topic_id: string; newScore: number }[] = []
   for (const [topicName, scores] of topicScores) {
     const needle = topicName.toLowerCase()
-    let topic_id: string | undefined
-    for (const [name, id] of topicByName) {
-      if (name.includes(needle) || needle.includes(name)) { topic_id = id; break }
+    let topic_id = topicByName.get(needle)   // exact match wins
+    if (!topic_id) {
+      // fallback: pick the longest matching candidate deterministically
+      let bestName = ''
+      for (const [name, id] of topicByName) {
+        if (name.includes(needle) || needle.includes(name)) {
+          if (name.length > bestName.length) { bestName = name; topic_id = id }
+        }
+      }
     }
     if (!topic_id) continue
     resolvedTopics.push({ topicName, topic_id, newScore: scores.correct / scores.total })
@@ -336,7 +344,8 @@ Return JSON only: {"score": 0.0-1.0, "correct": true/false, "feedback": "one sen
       existingByTopic.set(row.topic_id, Number(row.mastery_score ?? 0))
     }
 
-    const masteryUpserts: { user_id: string; topic_id: string; mastery_score: number }[] = []
+    const nowIso = new Date().toISOString()
+    const masteryUpserts: { user_id: string; topic_id: string; mastery_score: number; last_updated: string }[] = []
     const historyInserts: { user_id: string; topic_id: string; mastery_score: number }[] = []
 
     for (const r of resolvedTopics) {
@@ -345,7 +354,7 @@ Return JSON only: {"score": 0.0-1.0, "correct": true/false, "feedback": "one sen
       const blended = hadExisting ? oldScore * (1 - masteryWeight) + r.newScore * masteryWeight : r.newScore
       const finalScore = Math.min(1, Math.max(0, blended))
 
-      masteryUpserts.push({ user_id: userId, topic_id: r.topic_id, mastery_score: finalScore })
+      masteryUpserts.push({ user_id: userId, topic_id: r.topic_id, mastery_score: finalScore, last_updated: nowIso })
       historyInserts.push({ user_id: userId, topic_id: r.topic_id, mastery_score: finalScore })
       masteryUpdates.push({ topic_id: r.topic_id, topicName: r.topicName, oldScore, newScore: finalScore })
     }

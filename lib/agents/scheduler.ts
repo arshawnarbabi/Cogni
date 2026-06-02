@@ -214,14 +214,18 @@ export async function runScheduler(userId: string): Promise<void> {
 
   const tasks: TaskItem[] = []
 
-  // Flashcard review blocks (only if courses have extracted topics)
-  if (scored.length > 0) {
-    const totalPriority = scored.reduce((sum, c) => sum + c.priority, 0)
-    scored
+  // Flashcard review blocks — only emit for courses that actually have due cards.
+  // A zero-card course (e.g. high professor_weight + low mastery) would otherwise
+  // surface a misleading "Flashcard review / No cards yet" task and dilute the
+  // session-minute allocation owed to genuinely reviewable courses.
+  const reviewable = scored.filter(c => c.card_count > 0)
+  if (reviewable.length > 0) {
+    const totalPriority = reviewable.reduce((sum, c) => sum + c.priority, 0)
+    reviewable
       .sort((a, b) => b.priority - a.priority)
       .forEach((course, i) => {
-        const share = totalPriority > 0 ? course.priority / totalPriority : 1 / scored.length
-        const cappedShare = Math.min(0.7, Math.max(share, scored.length === 1 ? 1 : 0.1))
+        const share = totalPriority > 0 ? course.priority / totalPriority : 1 / reviewable.length
+        const cappedShare = Math.min(0.7, Math.max(share, reviewable.length === 1 ? 1 : 0.1))
         const duration = Math.round(sessionMinutes * cappedShare)
         if (duration < 5) return
         tasks.push({
@@ -455,9 +459,13 @@ export async function generateUpcomingPreview(userId: string): Promise<void> {
 
   const assignmentsByDate = new Map<string, { assignment_id: string; name: string; due_date: string; course_id: string }[]>()
   for (const a of (assignmentsResult.data ?? []) as { assignment_id: string; name: string; due_date: string; course_id: string }[]) {
-    const arr = assignmentsByDate.get(a.due_date) ?? []
-    arr.push(a)
-    assignmentsByDate.set(a.due_date, arr)
+    // due_date is a timestamptz, so normalize to the user's local date key before
+    // grouping. dateStrs are derived from dateKeyInTimeZone in the same timezone, so
+    // this keeps assignments near a UTC day boundary on the correct local preview day.
+    const dueKey = dateKeyInTimeZone(new Date(a.due_date), timeZone)
+    const arr = assignmentsByDate.get(dueKey) ?? []
+    arr.push(a) // keep original a.due_date for display
+    assignmentsByDate.set(dueKey, arr)
   }
 
   const rowsToInsert: { user_id: string; plan_date: string; tasks: TaskItem[]; generated_at: string }[] = []

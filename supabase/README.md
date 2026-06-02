@@ -29,9 +29,12 @@ Run these SQL files in the Supabase SQL editor **in this order** for a fresh dep
 - `user-timezone.sql` — `users.timezone`
 - `calendar-token-vault-migration.sql` — makes calendar token columns nullable after moving token secrets to Vault
 
-## 6. Functions
+## 6. Functions and indexes
 - `fsrs-review-rpc.sql` — `review_card_atomic` function (atomic FSRS + mastery update)
 - `rag-functions.sql` — `match_material_chunks` vector similarity search
+- `vault-delete.sql` — `delete_user_secret` / `delete_user_api_key` Vault removal RPCs (run after `vault-helpers.sql`)
+- `rag-keyword-index.sql` — GIN full-text index on `material_embeddings.content` for the RAG keyword fallback
 
-## 7. One-time data backfills
+## 7. One-time data backfills and migrations
 - `content-coverage-backfill.sql` — backfills `topics.content_coverage` from flashcard counts (run once)
+- `user-keys-vault-migration.sql` — moves any plaintext `user_keys` secrets (e.g. OpenAI keys) into Vault, then removes the plaintext rows (run after `vault-helpers.sql` and `user-keys.sql`)

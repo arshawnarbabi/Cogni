@@ -1,4 +1,5 @@
 import { createEmptyCard, fsrs, Rating, type Card } from 'ts-fsrs'
+import { dateKeyInTimeZone, addDaysToDateKey } from '@/lib/time'
 
 export { Rating }
 
@@ -19,7 +20,8 @@ export function scheduleReview(
     fsrs_last_review: string | null
     fsrs_next_review_date: string
   },
-  rating: 1 | 2 | 3 | 4
+  rating: 1 | 2 | 3 | 4,
+  timeZone = 'UTC'
 ) {
   const stateMap: Record<string, number> = { new: 0, learning: 1, review: 2, relearning: 3 }
   const card: Card = {
@@ -40,21 +42,23 @@ export function scheduleReview(
   // scheduling keys are '1'|'2'|'3'|'4' matching Rating enum values
   const next = (scheduling as unknown as Record<string, { card: Card }>)[String(rating)].card
 
-  return dbFromCard(next, { clampToTomorrow: true })
+  return dbFromCard(next, { clampToTomorrow: true, timeZone })
 }
 
-function dbFromCard(card: Card, opts: { clampToTomorrow?: boolean } = {}) {
+function dbFromCard(card: Card, opts: { clampToTomorrow?: boolean; timeZone?: string } = {}) {
   const stateLabel = ['new', 'learning', 'review', 'relearning'][card.state] ?? 'new'
   // fsrs_next_review_date is a date column, but ts-fsrs schedules learning-phase
   // cards in minutes (e.g. "Good" on a new card → +10 min, still today). Without
   // clamping, the card would round to today and reappear in the same session.
   // Cogni is one-session-per-day, so once rated the card moves to tomorrow at soonest.
-  const todayStr = new Date().toISOString().split('T')[0]
-  let dueStr = card.due.toISOString().split('T')[0]
+  // Use the user's local date (the same dateKeyInTimeZone the .lte('fsrs_next_review_date', today)
+  // due queries use) so the clamp boundary matches the local "today" and a reviewed card
+  // can't reappear in the same local session.
+  const tz = opts.timeZone ?? 'UTC'
+  const todayStr = dateKeyInTimeZone(new Date(), tz)
+  let dueStr = dateKeyInTimeZone(card.due, tz)
   if (opts.clampToTomorrow && dueStr <= todayStr) {
-    const tomorrow = new Date()
-    tomorrow.setDate(tomorrow.getDate() + 1)
-    dueStr = tomorrow.toISOString().split('T')[0]
+    dueStr = addDaysToDateKey(todayStr, 1)
   }
   return {
     fsrs_stability: card.stability,

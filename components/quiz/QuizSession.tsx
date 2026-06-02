@@ -763,7 +763,12 @@ export function QuizSession({ courseId, courseName, topicOptions, initialQuestio
           inSession: !!normalizedInitial,  // 30/70 blend for tutor-generated quizzes
         }),
       })
-      const data = await res.json() as GradeSummary
+      const data = await res.json() as GradeSummary & { error?: string }
+      if (!res.ok || data.error || !Array.isArray(data.results) || !Array.isArray(data.missedTopics) || !Array.isArray(data.masteryUpdates)) {
+        setSummary({ correctCount: 0, scorePct: 0, missedTopics: [], masteryUpdates: [], results: [] })
+        setPhase('results')
+        return
+      }
       setSummary(data)
       setPhase('results')
       onComplete?.(data)

@@ -1,6 +1,6 @@
 import { createServiceClient } from '@/lib/supabase/server'
 import { readWikiFile } from '@/lib/wiki'
-import { dateKeyInTimeZone } from '@/lib/time'
+import { dateKeyInTimeZone, startOfLocalDayUtc } from '@/lib/time'
 
 export type TutorMode = 'answer' | 'teach' | 'focus'
 
@@ -204,13 +204,15 @@ export async function getOrCreateSession(
     .select('timezone')
     .eq('user_id', userId)
     .single()
-  const today = dateKeyInTimeZone(new Date(), userRow?.timezone ?? 'UTC')
+  const tz = userRow?.timezone ?? 'UTC'
+  const today = dateKeyInTimeZone(new Date(), tz)
+  const dayStart = startOfLocalDayUtc(today, tz).toISOString()
   const { data: existing } = await service
     .from('session_log')
     .select('session_id')
     .eq('user_id', userId)
     .eq('course_id', courseId)
-    .gte('created_at', today + 'T00:00:00')
+    .gte('created_at', dayStart)
     .order('created_at', { ascending: false })
     .limit(1)
     .single()

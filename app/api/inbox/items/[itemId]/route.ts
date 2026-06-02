@@ -32,8 +32,22 @@ export async function DELETE(_req: Request, { params }: Params) {
     .eq('user_id', user.id)
   if (inboxDeleteError) return NextResponse.json({ error: inboxDeleteError.message }, { status: 500 })
   if (item.material_id) {
+    // Capture the storage path before deleting the row so we can clean up the object too.
+    const { data: material } = await service
+      .from('materials')
+      .select('storage_path')
+      .eq('material_id', item.material_id)
+      .eq('user_id', user.id)
+      .single()
+
     const { error: materialDeleteError } = await service.from('materials').delete().eq('material_id', item.material_id).eq('user_id', user.id)
     if (materialDeleteError) return NextResponse.json({ error: materialDeleteError.message }, { status: 500 })
+
+    // Remove the orphaned storage object (best-effort — the DB rows are already gone).
+    if (material?.storage_path) {
+      const { error: storageError } = await service.storage.from('materials').remove([material.storage_path])
+      if (storageError) console.error('[inbox/dismiss] failed to remove storage object', material.storage_path, storageError)
+    }
   }
 
   return NextResponse.json({ ok: true })

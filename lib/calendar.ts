@@ -1,6 +1,6 @@
 import { createServiceClient } from '@/lib/supabase/server'
 import { getUserSecret, setUserSecret } from '@/lib/vault'
-import { dateKeyInTimeZone } from '@/lib/time'
+import { dateKeyInTimeZone, startOfLocalDayUtc, endOfLocalDayUtc, studyWindowUtc } from '@/lib/time'
 
 const GOOGLE_TOKEN_URL = 'https://oauth2.googleapis.com/token'
 const GOOGLE_CALENDAR_API = 'https://www.googleapis.com/calendar/v3'
@@ -113,9 +113,9 @@ async function getOrCreateCogniCalendar(token: string, userId: string): Promise<
 }
 
 // Delete all events from the Cogni calendar for a specific date (clears stale blocks)
-async function deleteCogniEventsForDate(token: string, calendarId: string, date: string): Promise<void> {
-  const timeMin = new Date(date + 'T00:00:00').toISOString()
-  const timeMax = new Date(date + 'T23:59:59').toISOString()
+async function deleteCogniEventsForDate(token: string, calendarId: string, date: string, timeZone: string): Promise<void> {
+  const timeMin = startOfLocalDayUtc(date, timeZone).toISOString()
+  const timeMax = endOfLocalDayUtc(date, timeZone).toISOString()
 
   const res = await fetch(
     `${GOOGLE_CALENDAR_API}/calendars/${encodeURIComponent(calendarId)}/events?timeMin=${encodeURIComponent(timeMin)}&timeMax=${encodeURIComponent(timeMax)}&singleEvents=true&maxResults=250`,
@@ -153,12 +153,13 @@ async function listAllCalendarIds(token: string): Promise<string[]> {
 async function getBusyWindows(
   token: string,
   calendarIds: string[],
-  date: string
+  date: string,
+  timeZone: string
 ): Promise<Array<{ start: number; end: number }>> {
   if (calendarIds.length === 0) return []
 
-  const timeMin = new Date(date + 'T00:00:00').toISOString()
-  const timeMax = new Date(date + 'T23:59:59').toISOString()
+  const timeMin = startOfLocalDayUtc(date, timeZone).toISOString()
+  const timeMax = endOfLocalDayUtc(date, timeZone).toISOString()
 
   const res = await fetch(`${GOOGLE_CALENDAR_API}/freeBusy`, {
     method: 'POST',
@@ -241,7 +242,7 @@ export async function writeStudyBlocksToCalendar(
   const today = dateKeyInTimeZone(new Date(), timeZone)
 
   // 1. Clear any existing Cogni blocks for today to prevent stacking
-  await deleteCogniEventsForDate(token, calendarId, today)
+  await deleteCogniEventsForDate(token, calendarId, today, timeZone)
 
   // 2. Get all user calendar IDs, excluding our own Cogni calendar
   const allCalendarIds = await listAllCalendarIds(token)
@@ -251,12 +252,14 @@ export async function writeStudyBlocksToCalendar(
   const busyWindows = await getBusyWindows(
     token,
     otherCalendarIds.length > 0 ? otherCalendarIds : ['primary'],
-    today
+    today,
+    timeZone
   )
 
-  // 4. Define study window (8am–10pm local server time)
-  const dayStart = new Date(today + `T${String(STUDY_START_HOUR).padStart(2, '0')}:00:00`).getTime()
-  const dayEnd = new Date(today + `T${String(STUDY_END_HOUR).padStart(2, '0')}:00:00`).getTime()
+  // 4. Define study window (8am–10pm in the user's local timezone) as UTC instants
+  const studyWindow = studyWindowUtc(today, timeZone, STUDY_START_HOUR, STUDY_END_HOUR)
+  const dayStart = studyWindow.start.getTime()
+  const dayEnd = studyWindow.end.getTime()
 
   // 5. Find free slots of at least 15 minutes within the study window
   const freeSlots = findFreeSlots(busyWindows, dayStart, dayEnd, 15)
@@ -272,6 +275,9 @@ export async function writeStudyBlocksToCalendar(
 
   let slotIdx = 0
   let slotCursor = freeSlots[0].start
+
+  let createdCount = 0
+  let failedCount = 0
 
   for (const task of sortedTasks) {
     const durationMs = task.duration_minutes * 60_000
@@ -293,7 +299,7 @@ export async function writeStudyBlocksToCalendar(
     const start = new Date(slotCursor)
     const end = new Date(slotCursor + durationMs)
 
-    await fetch(`${GOOGLE_CALENDAR_API}/calendars/${encodeURIComponent(calendarId)}/events`, {
+    const evRes = await fetch(`${GOOGLE_CALENDAR_API}/calendars/${encodeURIComponent(calendarId)}/events`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -304,7 +310,19 @@ export async function writeStudyBlocksToCalendar(
       }),
     })
 
+    if (evRes.ok) {
+      createdCount++
+    } else {
+      failedCount++
+      const body = await evRes.text()
+      console.error('[calendar] failed to create event for', task.course_name, evRes.status, body)
+    }
+
     slotCursor = end.getTime() + breakMs
+  }
+
+  if (failedCount > 0) {
+    console.warn(`[calendar] created ${createdCount} of ${createdCount + failedCount} study events for user`, userId)
   }
 }
 
@@ -319,8 +337,9 @@ export async function getExistingEvents(
   const calendarIds = await listAllCalendarIds(token)
   if (calendarIds.length === 0) return []
 
-  const timeMin = new Date(date + 'T00:00:00').toISOString()
-  const timeMax = new Date(date + 'T23:59:59').toISOString()
+  const timeZone = await getUserTimeZone(userId)
+  const timeMin = startOfLocalDayUtc(date, timeZone).toISOString()
+  const timeMax = endOfLocalDayUtc(date, timeZone).toISOString()
 
   const results: Array<{ start: string; end: string; summary: string; calendarId: string }> = []
 

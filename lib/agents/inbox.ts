@@ -252,6 +252,7 @@ export async function classifyMaterial(
   if (isContextHint) {
     await service.from('inbox_items').delete().eq('material_id', materialId).eq('user_id', userId)
     await service.from('materials').delete().eq('material_id', materialId).eq('user_id', userId)
+    await service.storage.from('materials').remove([storagePath]).catch(() => {})
     await appendToLog(userId, `Inbox: "${filename}" auto-dismissed as context hint`)
     return { courseId: null, tier: 4, status: 'classified', isHomework: false, dueDate: null, dismissed: true }
   }

@@ -46,7 +46,52 @@ export async function DELETE(
       .remove([`${user.id}/professor_${course.professor_id}.md`])
   }
 
-  // Delete course row — cascades to topics, flashcards, materials, test_results, session_messages
+  // Delete course files from storage (course_files DB rows cascade with the course,
+  // but the binary objects in the course-files bucket must be removed explicitly).
+  const { data: courseFiles } = await service
+    .from('course_files')
+    .select('storage_path')
+    .eq('course_id', courseId)
+    .eq('user_id', user.id)
+
+  const filePaths = (courseFiles ?? [])
+    .map((f: { storage_path: string }) => f.storage_path)
+    .filter(Boolean)
+
+  if (filePaths.length > 0) {
+    const { error: filesError } = await service.storage.from('course-files').remove(filePaths)
+    if (filesError) return NextResponse.json({ error: filesError.message }, { status: 500 })
+  }
+
+  // Explicitly delete materials and their embeddings. materials.course_id is
+  // `on delete set null` (NOT cascade), so deleting the course would otherwise
+  // orphan material rows and their embeddings. Delete embeddings before materials
+  // so this works whether or not the materials->embeddings cascade is intact.
+  const { data: materialRows } = await service
+    .from('materials')
+    .select('material_id')
+    .eq('course_id', courseId)
+    .eq('user_id', user.id)
+  const materialIds = (materialRows ?? []).map((m: { material_id: string }) => m.material_id)
+
+  if (materialIds.length > 0) {
+    const { error: embErr } = await service
+      .from('material_embeddings')
+      .delete()
+      .in('material_id', materialIds)
+      .eq('user_id', user.id)
+    if (embErr) return NextResponse.json({ error: embErr.message }, { status: 500 })
+
+    const { error: matErr } = await service
+      .from('materials')
+      .delete()
+      .eq('course_id', courseId)
+      .eq('user_id', user.id)
+    if (matErr) return NextResponse.json({ error: matErr.message }, { status: 500 })
+  }
+
+  // Delete course row — cascades to topics, flashcards, test_results, session_messages.
+  // Materials/embeddings are deleted explicitly above because materials.course_id is set-null, not cascade.
   const { error: deleteError } = await service
     .from('courses')
     .delete()

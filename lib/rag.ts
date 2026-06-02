@@ -176,7 +176,7 @@ async function keywordFallback(
     .select('material_id, chunk_index, content')
     .eq('user_id', userId)
     .in('material_id', ids)
-    .textSearch('content', searchQuery, { type: 'plain' })
+    .textSearch('content', searchQuery, { type: 'plain', config: 'english' })
     .limit(topK)
 
   return (data ?? []) as RetrievedChunk[]
