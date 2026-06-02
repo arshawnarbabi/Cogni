@@ -1,9 +1,11 @@
 # Supabase Setup
 
-Run these SQL files in the Supabase SQL editor **in this order** for a fresh deployment.
+> **Quick option:** first enable the **Vault** extension (Dashboard → Database → Extensions → `supabase_vault`), then paste **[`setup.sql`](setup.sql)** into the SQL editor and run it once. It bundles every file below in the correct order and is **idempotent — safe to re-run** to sync an existing database. `setup.sql` is auto-generated from the files below (the source of truth); edit those and regenerate, don't edit `setup.sql` by hand.
+
+Or run these SQL files in the Supabase SQL editor **in this order** for a fresh deployment.
 
 ## 1. Core schema
-- `schema.sql` — all tables, RLS, and indexes
+- `schema.sql` — core tables, RLS, and indexes (additional tables follow in sections 3–4)
 
 ## 2. Vault (run after enabling the Vault extension in Supabase dashboard)
 - `vault-helpers.sql` — API key and named user-secret storage RPCs
