@@ -7,7 +7,7 @@
   <img src="https://img.shields.io/badge/Supabase-PostgreSQL-3ECF8E" alt="Supabase" />
   <img src="https://img.shields.io/badge/Claude-Sonnet%204.6-CC785C" alt="Claude" />
   <img src="https://img.shields.io/badge/status-beta-F59E0B" alt="Beta" />
-  <a href="https://trycogni.vercel.app/"><img src="https://img.shields.io/badge/website-trycogni.vercel.app-1D4ED8" alt="Website" /></a>
+  <a href="https://trycogni.arshawnarbabi.com/"><img src="https://img.shields.io/badge/website-trycogni.arshawnarbabi.com-1D4ED8" alt="Website" /></a>
   <a href="https://vercel.com/new/clone?repository-url=https://github.com/arshawnarbabi/Cogni"><img src="https://vercel.com/button" alt="Deploy with Vercel" /></a>
 </p>
 
@@ -240,7 +240,19 @@ cp .env.example .env.local
 npm run dev
 ```
 
-Vercel Cron Jobs do not run locally (scheduler fires at 5am UTC, nudge at 6am UTC in production). The scheduler runs automatically when you navigate to Today if no plan exists for today. Nudge checks and other cron-triggered agents can be triggered manually via Settings → Dev Tools.
+Vercel Cron Jobs do not run locally (scheduler fires at 5am UTC, nudge at 6am UTC in production). The scheduler runs automatically when you navigate to Today if no plan exists for today. In local development (`NODE_ENV=development`), a Dev Tools section in Settings exposes a reset-account helper.
+
+<br />
+
+## 🧪 Testing
+
+```bash
+npm test                 # unit tests — timezone/FSRS logic (no setup needed)
+npm run test:integration # engine tests vs a local Supabase (review RPC, Vault, RAG)
+npm run test:e2e         # Playwright end-to-end vs the running app
+```
+
+Unit tests run anywhere. The integration and end-to-end suites run against a **local** Supabase stack (`supabase start`) so your real project is never touched — see [`test-harness/README.md`](test-harness/README.md) for the seed/apply scripts and setup.
 
 <br />
 
