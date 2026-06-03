@@ -75,46 +75,27 @@ export async function POST(request: Request) {
 
     if (!professorId) {
       const trimmedProfName = course.professorName.trim()
-      const { data: existingProf } = await service
+      // Upsert by (user_id, name): race-safe find-or-create (was select-then-insert,
+      // a TOCTOU that duplicated on concurrent/retried onboarding submits).
+      const { data: prof, error: profError } = await service
         .from('professors')
+        .upsert({ user_id: user.id, name: trimmedProfName }, { onConflict: 'user_id,name' })
         .select('professor_id')
-        .eq('user_id', user.id)
-        .eq('name', trimmedProfName)
-        .limit(1)
-        .maybeSingle()
+        .single()
 
-      if (existingProf) {
-        professorId = existingProf.professor_id
-      } else {
-        const { data: prof, error: profError } = await service
-          .from('professors')
-          .insert({ user_id: user.id, name: trimmedProfName })
-          .select('professor_id')
-          .single()
-
-        if (profError) {
-          return NextResponse.json({ error: profError.message }, { status: 500 })
-        }
-        professorId = prof.professor_id
+      if (profError) {
+        return NextResponse.json({ error: profError.message }, { status: 500 })
       }
+      professorId = prof.professor_id
     }
 
     const trimmedCourseName = course.name.trim()
     let courseId: string
-    const { data: existingCourse } = await service
-      .from('courses')
-      .select('course_id')
-      .eq('user_id', user.id)
-      .eq('name', trimmedCourseName)
-      .limit(1)
-      .maybeSingle()
-
-    if (existingCourse) {
-      courseId = existingCourse.course_id
-    } else {
+    {
+      // Upsert by (user_id, name): race-safe find-or-create for the course.
       const { data: courseRow, error: courseError } = await service
         .from('courses')
-        .insert({ user_id: user.id, professor_id: professorId, name: trimmedCourseName })
+        .upsert({ user_id: user.id, professor_id: professorId, name: trimmedCourseName }, { onConflict: 'user_id,name' })
         .select('course_id')
         .single()
 

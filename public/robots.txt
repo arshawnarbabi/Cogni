@@ -1,0 +1,4 @@
+# The Cogni app lives behind authentication; the marketing site is a separate
+# origin. Keep the app out of search indexes.
+User-agent: *
+Disallow: /

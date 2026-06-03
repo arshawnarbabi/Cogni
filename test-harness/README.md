@@ -29,7 +29,7 @@ MOCK_AGENTS=true        # mock AI for Layer 3; set false for the live-AI specs
 
 ## Layer 2 — engine tests against the local DB
 ```bash
-SUPABASE_URL=http://127.0.0.1:54321 SUPABASE_SERVICE_ROLE_KEY=<secret> \
+SUPABASE_URL=http://127.0.0.1:54321 SUPABASE_SERVICE_ROLE_KEY=<secret> SUPABASE_ANON_KEY=<publishable> \
   npm run test:integration   # review RPC, Vault, RAG keyword index
 ```
 

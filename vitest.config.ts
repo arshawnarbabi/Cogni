@@ -8,9 +8,9 @@ export default defineConfig({
   },
   test: {
     environment: 'node',
-    // Default `npm test` runs only the dependency-free unit tests. The integration
-    // tests need a running local Supabase and are run explicitly:
-    //   npx vitest run tests/integration
-    include: ['tests/unit/**/*.test.ts'],
+    // `include` covers both suites; the npm scripts pass a path filter so
+    // `npm test` runs only the dependency-free unit tests, while
+    // `npm run test:integration` runs the local-Supabase tests.
+    include: ['tests/**/*.test.ts'],
   },
 })

@@ -69,9 +69,12 @@ export async function POST(request: Request) {
   }
 
   if (!professorId) {
+    // Upsert by (user_id, name) so adding a course for an existing professor
+    // reuses that professor instead of creating a duplicate (race-safe via the
+    // professors_user_name_uniq index).
     const { data: prof, error: profError } = await service
       .from('professors')
-      .insert({ user_id: user.id, name: professorName })
+      .upsert({ user_id: user.id, name: professorName.trim() }, { onConflict: 'user_id,name' })
       .select('professor_id')
       .single()
 

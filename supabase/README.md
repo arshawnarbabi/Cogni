@@ -40,3 +40,8 @@ Or run these SQL files in the Supabase SQL editor **in this order** for a fresh 
 ## 7. One-time data backfills and migrations
 - `content-coverage-backfill.sql` — backfills `topics.content_coverage` from flashcard counts (run once)
 - `user-keys-vault-migration.sql` — moves any plaintext `user_keys` secrets (e.g. OpenAI keys) into Vault, then removes the plaintext rows (run after `vault-helpers.sql` and `user-keys.sql`)
+
+## 8. Hosted multi-tenant security hardening (required before public sign-up)
+- `security-hardening.sql` — REVOKEs the SECURITY-DEFINER vault/`review_card_atomic` RPCs from `anon`/`authenticated` (closes a direct-Data-API key-theft + cross-tenant-write hole), adds explicit `WITH CHECK` to the user-scoped RLS policies, and adds `unique(user_id, name)` to professors/courses. Idempotent. Run last. *(Already included at the end of `setup.sql`.)*
+
+> If you operate Cogni as a single shared deployment with open sign-up, section 8 is **mandatory** — without it any signed-up user can decrypt every user's API keys via the public Data API. (Self-host single-user deployments should still run it.)
