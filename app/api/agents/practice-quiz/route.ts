@@ -44,7 +44,10 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'Missing courseId or courseName' }, { status: 400 })
   }
 
-  const count = Math.min(50, Math.max(1, Math.floor(Number(questionCount)) || 10))
+  // Cap at 20 (the UI's max option). The generator uses max_tokens 4096, and
+  // ~50 questions overflow that budget — the model output truncates into invalid
+  // JSON and the request 500s. 20 fits comfortably and still bounds abuse.
+  const count = Math.min(20, Math.max(1, Math.floor(Number(questionCount)) || 10))
 
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
