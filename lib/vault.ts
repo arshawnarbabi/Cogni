@@ -9,10 +9,9 @@ export async function getUserApiKey(userId: string): Promise<string | null> {
     console.error('[vault] get_user_api_key RPC error:', error)
     return null
   }
-  if (!data) {
-    console.error(`[vault] get_user_api_key returned empty for user ${userId} (secret name should be "api_key_${userId}")`)
-    return null
-  }
+  // No key configured is a normal, expected state (BYOK — the UI shows a nudge),
+  // so return null quietly instead of logging an error on every key lookup.
+  if (!data) return null
   return data as string
 }
 
