@@ -250,8 +250,8 @@ Cogni runs two ways:
 **Hardening highlights (v1.3.0):**
 
 - **Bypass-proof signup gating** — open / invite-code / `.edu` modes enforced at the **database layer** (trigger on `auth.users`), so it covers the server route, direct signups, and OAuth.
-- **CAPTCHA** — Cloudflare Turnstile on signup and password reset.
-- **Consent, age capture, and password reset** — collected at signup (email + OAuth), with a full password-reset flow.
+- **CAPTCHA** — Cloudflare Turnstile on signup.
+- **Consent + age capture** — collected at signup (email + OAuth). Plus a full password-reset flow.
 - **Legal pages** — Terms, Privacy (with AI sub-processor disclosure), and Acceptable-Use.
 - **Per-user AI quotas + suspend** — daily AI quotas and account suspend enforced on every AI route.
 - **Image moderation** — applied on uploads.
