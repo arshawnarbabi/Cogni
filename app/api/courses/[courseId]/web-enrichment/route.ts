@@ -1,6 +1,7 @@
 import { createClient } from '@/lib/supabase/server'
 import { runWebEnrichment } from '@/lib/agents/web-enrichment'
 import { getUserApiKey } from '@/lib/vault'
+import { aiRouteGuard } from '@/lib/rate-limit'
 import { NextResponse } from 'next/server'
 
 export async function POST(
@@ -15,6 +16,11 @@ export async function POST(
 
   const apiKey = await getUserApiKey(user.id)
   if (!apiKey) return NextResponse.json({ error: 'No API key' }, { status: 402 })
+
+  // Reject suspended accounts + enforce the daily cap (key-check first, so a
+  // keyless request never burns quota). This is the most expensive AI path.
+  const guard = await aiRouteGuard(user.id, 'web_enrichment')
+  if (guard) return NextResponse.json({ error: guard.error }, { status: guard.status })
 
   const service = (await import('@/lib/supabase/server')).createServiceClient()
   const { data: courseRow } = await service

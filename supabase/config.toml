@@ -212,15 +212,27 @@ otp_length = 6
 # Number of seconds before the email OTP expires (defaults to 1 hour).
 otp_expiry = 3600
 
-# Use a production-ready SMTP server
+# Production transactional email (Resend recommended).
+#
+# LOCAL: leave this commented + enable_confirmations=false above — local signups
+# auto-confirm and emails land in Mailpit (http://127.0.0.1:54324), so no SMTP
+# is needed for development/tests.
+#
+# PRODUCTION: configure SMTP in the Supabase DASHBOARD (Authentication → Emails →
+# SMTP), NOT here — config.toml only drives the local stack. Then turn ON
+# "Confirm email" in the dashboard so a throwaway/fake email cannot yield a usable
+# session. Resend settings: host smtp.resend.com, port 465, user "resend", pass =
+# your Resend API key, sender = a verified domain address. Verify SPF/DKIM/DMARC
+# and send a real test that lands in a Gmail/Outlook inbox (not spam) first.
+#
 # [auth.email.smtp]
 # enabled = true
-# host = "smtp.sendgrid.net"
-# port = 587
-# user = "apikey"
-# pass = "env(SENDGRID_API_KEY)"
-# admin_email = "admin@email.com"
-# sender_name = "Admin"
+# host = "smtp.resend.com"
+# port = 465
+# user = "resend"
+# pass = "env(RESEND_API_KEY)"
+# admin_email = "noreply@your-domain.com"
+# sender_name = "Cogni"
 
 # Uncomment to customize email template
 # [auth.email.template.invite]

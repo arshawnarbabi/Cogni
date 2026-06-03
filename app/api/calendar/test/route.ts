@@ -1,5 +1,6 @@
 import { createClient } from '@/lib/supabase/server'
 import { writeStudyBlocksToCalendar } from '@/lib/calendar'
+import { serverError } from '@/lib/api-error'
 import { NextResponse } from 'next/server'
 
 // Dev-only test endpoint
@@ -18,6 +19,6 @@ export async function GET() {
     ])
     return NextResponse.json({ ok: true, message: 'Calendar write attempted — check your Google Calendar' })
   } catch (err) {
-    return NextResponse.json({ ok: false, error: String(err) })
+    return serverError('calendar/test', err)
   }
 }

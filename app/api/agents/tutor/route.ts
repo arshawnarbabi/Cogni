@@ -1,6 +1,8 @@
 import { createClient, createServiceClient } from '@/lib/supabase/server'
 import { getUserApiKey } from '@/lib/vault'
 import { dateKeyInTimeZone, startOfLocalDayUtc } from '@/lib/time'
+import { DEFAULT_TUTOR_DAILY_LIMIT } from '@/lib/rate-limit'
+import { getAppConfig } from '@/lib/app-config'
 import {
   buildTutorSystemPrompt,
   getOrCreateSession,
@@ -152,13 +154,27 @@ export async function POST(request: Request) {
 
   const { data: userRow } = await service
     .from('users')
-    .select('daily_message_limit, timezone')
+    .select('daily_message_limit, timezone, suspended')
     .eq('user_id', user.id)
     .single()
 
-  if (userRow?.daily_message_limit != null) {
+  if (userRow?.suspended === true) {
+    return NextResponse.json({ error: 'Account suspended.' }, { status: 403 })
+  }
+
+  // Global AI kill-switch — the Tutor uses its own message cap (not aiRouteGuard),
+  // so the kill-switch must be checked here explicitly (highest-volume AI path).
+  // Fresh read so the emergency switch is immediate.
+  if ((await getAppConfig({ fresh: true })).aiDisabled) {
+    return NextResponse.json({ error: 'AI features are temporarily unavailable. Please try again later.' }, { status: 503 })
+  }
+
+  // Per-user daily message cap. A null column means "use the default" — previously
+  // null meant unlimited, which left the Tutor (the most-used AI route) uncapped.
+  {
+    const dailyLimit = userRow?.daily_message_limit ?? DEFAULT_TUTOR_DAILY_LIMIT
     // Reset the counter at the user's local midnight, not the server's (UTC on Vercel).
-    const tz = userRow.timezone ?? 'UTC'
+    const tz = userRow?.timezone ?? 'UTC'
     const todayStart = startOfLocalDayUtc(dateKeyInTimeZone(new Date(), tz), tz)
     const { count } = await service
       .from('session_messages')
@@ -166,7 +182,7 @@ export async function POST(request: Request) {
       .eq('user_id', user.id)
       .eq('role', 'user')
       .gte('created_at', todayStart.toISOString())
-    if ((count ?? 0) >= userRow.daily_message_limit) {
+    if ((count ?? 0) >= dailyLimit) {
       return NextResponse.json({ error: 'rate_limited' }, { status: 429 })
     }
   }
@@ -638,7 +654,9 @@ export async function POST(request: Request) {
       } catch (err) {
         console.error('[tutor] stream error', err)
         if (!closed) {
-          try { controller.enqueue(emit({ t: 'error', c: err instanceof Error ? err.message : String(err) })) } catch { /* controller may be unwritable */ }
+          // Never emit the raw exception/DB message to the client — it leaks internals.
+          // The real cause is logged server-side above.
+          try { controller.enqueue(emit({ t: 'error', c: 'Something went wrong. Please try again.' })) } catch { /* controller may be unwritable */ }
           try { controller.close() } catch { /* already closed */ }
           closed = true
         }

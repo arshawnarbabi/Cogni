@@ -1,6 +1,7 @@
 import { createClient, createServiceClient } from '@/lib/supabase/server'
 import { listUserSessions } from '@/lib/agents/tutor'
 import { requireOwnedSession } from '@/lib/authz'
+import { serverError } from '@/lib/api-error'
 import { NextResponse } from 'next/server'
 
 export async function GET() {
@@ -32,7 +33,7 @@ export async function PATCH(request: Request) {
     .eq('session_id', sessionId)
     .eq('user_id', user.id)
 
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+  if (error) return serverError('tutor/sessions:PATCH', error)
   return NextResponse.json({ ok: true })
 }
 
@@ -52,7 +53,7 @@ export async function DELETE(request: Request) {
   // session_messages cascade via FK
   const service = createServiceClient()
   const { error } = await service.from('session_log').delete().eq('session_id', sessionId).eq('user_id', user.id)
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+  if (error) return serverError('tutor/sessions:DELETE', error)
 
   return NextResponse.json({ ok: true })
 }

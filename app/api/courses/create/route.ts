@@ -2,8 +2,10 @@ import { createClient, createServiceClient } from '@/lib/supabase/server'
 import { runProfiler } from '@/lib/agents/profiler'
 import { getUserApiKey } from '@/lib/vault'
 import { requireOwnedProfessor } from '@/lib/authz'
+import { isUserSuspended, consumeAiQuota } from '@/lib/rate-limit'
 import { hasExpectedFileSignature } from '@/lib/file-validation'
 import { ICON_NAMES } from '@/lib/course-icon-names'
+import { serverError } from '@/lib/api-error'
 import Anthropic from '@anthropic-ai/sdk'
 import { NextResponse } from 'next/server'
 
@@ -48,6 +50,10 @@ export async function POST(request: Request) {
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
+  if (await isUserSuspended(user.id)) {
+    return NextResponse.json({ error: 'Account suspended.' }, { status: 403 })
+  }
+
   const form = await request.formData()
   const name = ((form.get('name') as string) ?? '').trim()
   const professorName = ((form.get('professorName') as string) ?? '').trim()
@@ -79,7 +85,7 @@ export async function POST(request: Request) {
       .single()
 
     if (profError || !prof) {
-      return NextResponse.json({ error: profError?.message ?? 'Failed to create professor' }, { status: 500 })
+      return serverError('courses/create:professor', profError)
     }
     professorId = prof.professor_id
   }
@@ -91,7 +97,7 @@ export async function POST(request: Request) {
     .single()
 
   if (courseError || !courseRow) {
-    return NextResponse.json({ error: courseError?.message ?? 'Failed to create course' }, { status: 500 })
+    return serverError('courses/create:course', courseError)
   }
 
   const courseId = courseRow.course_id
@@ -118,7 +124,8 @@ export async function POST(request: Request) {
       .upload(path, syllabus, { upsert: false })
 
     if (uploadError) {
-      return NextResponse.json({ ok: true, courseId, warning: `Course created, syllabus upload failed: ${uploadError.message}` })
+      console.error('[courses/create] syllabus upload failed', uploadError)
+      return NextResponse.json({ ok: true, courseId, warning: 'Course created, but the syllabus upload failed.' })
     }
 
     const { data: material, error: materialError } = await service
@@ -136,14 +143,21 @@ export async function POST(request: Request) {
       .single()
 
     if (materialError || !material) {
+      console.error('[courses/create] syllabus metadata insert failed', materialError)
       await service.storage.from('materials').remove([path])
-      return NextResponse.json({ ok: true, courseId, warning: `Course created, syllabus metadata failed: ${materialError?.message ?? 'unknown error'}` })
+      return NextResponse.json({ ok: true, courseId, warning: 'Course created, but saving the syllabus failed.' })
     }
 
-    try {
-      await runProfiler(user.id, material.material_id, courseId, name)
-    } catch (e) {
-      console.error('[courses/create] profiler failed', e)
+    // Cap the syllabus-analysis AI work (shared 'profiler' daily quota with
+    // onboarding). The course is already created; only enrichment is skipped.
+    if (await consumeAiQuota(user.id, 'profiler')) {
+      try {
+        await runProfiler(user.id, material.material_id, courseId, name)
+      } catch (e) {
+        console.error('[courses/create] profiler failed', e)
+      }
+    } else {
+      console.warn(`[courses/create] profiler skipped for ${user.id} — daily AI cap reached`)
     }
   }
 

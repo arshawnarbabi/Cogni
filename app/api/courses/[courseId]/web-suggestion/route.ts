@@ -2,6 +2,8 @@ import { createClient, createServiceClient } from '@/lib/supabase/server'
 import { runProfiler } from '@/lib/agents/profiler'
 import { processEmbeddings } from '@/lib/rag'
 import { requireOwnedCourse } from '@/lib/authz'
+import { isUserSuspended, consumeAiQuota } from '@/lib/rate-limit'
+import { serverError } from '@/lib/api-error'
 import { NextResponse } from 'next/server'
 
 export async function GET(
@@ -46,6 +48,10 @@ export async function POST(
   const service = createServiceClient()
   const ownedCourse = await requireOwnedCourse(user.id, courseId)
   if (!ownedCourse) return NextResponse.json({ error: 'Not found' }, { status: 404 })
+
+  if (await isUserSuspended(user.id)) {
+    return NextResponse.json({ error: 'Account suspended.' }, { status: 403 })
+  }
 
   const { data: suggestion } = await service
     .from('course_web_suggestions')
@@ -106,12 +112,18 @@ export async function POST(
     .eq('id', suggestionId)
     .eq('course_id', courseId)
     .eq('user_id', user.id)
-  if (approveError) return NextResponse.json({ error: approveError.message }, { status: 500 })
+  if (approveError) return serverError('web-suggestion:approve', approveError)
 
-  // Run profiler + RAG — both non-blocking from client perspective
-  runProfiler(user.id, material.material_id, courseId, courseName).catch(e =>
-    console.error('[web-suggestion] profiler failed', e)
-  )
+  // Run profiler + RAG — both non-blocking from client perspective. Gate the
+  // profiler on the shared 'profiler' daily cap (skip gracefully if exhausted;
+  // the suggestion is already approved + stored). Embeddings are cheap, left as-is.
+  if (await consumeAiQuota(user.id, 'profiler')) {
+    runProfiler(user.id, material.material_id, courseId, courseName).catch(e =>
+      console.error('[web-suggestion] profiler failed', e)
+    )
+  } else {
+    console.warn(`[web-suggestion] profiler skipped for ${user.id} — daily AI cap reached`)
+  }
   processEmbeddings(user.id, material.material_id, suggestion.content).catch(e =>
     console.error('[web-suggestion] embeddings failed', e)
   )
@@ -138,7 +150,7 @@ export async function DELETE(
     .eq('id', suggestionId)
     .eq('course_id', courseId)
     .eq('user_id', user.id)
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+  if (error) return serverError('web-suggestion:dismiss', error)
 
   return NextResponse.json({ ok: true })
 }

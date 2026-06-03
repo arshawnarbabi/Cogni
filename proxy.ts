@@ -38,7 +38,10 @@ export async function proxy(request: NextRequest) {
   const user = session?.user
 
   const { pathname } = request.nextUrl
-  const publicRoutes = ['/auth', '/auth/callback']
+  // Public, unauthenticated routes: the auth flow (/auth covers /auth/callback)
+  // and the legal pages. Signup consent links point at /legal/*, so they must be
+  // reachable without a session.
+  const publicRoutes = ['/auth', '/legal']
   const isPublicRoute = publicRoutes.some(route => pathname.startsWith(route))
 
   if (!user && !isPublicRoute) {

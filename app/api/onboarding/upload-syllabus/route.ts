@@ -1,5 +1,6 @@
 import { createClient, createServiceClient } from '@/lib/supabase/server'
 import { hasExpectedFileSignature } from '@/lib/file-validation'
+import { serverError } from '@/lib/api-error'
 import { NextResponse } from 'next/server'
 
 export async function POST(request: Request) {
@@ -30,7 +31,7 @@ export async function POST(request: Request) {
     .from('materials')
     .upload(path, file, { upsert: false })
 
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+  if (error) return serverError('onboarding.uploadSyllabus', error)
 
   return NextResponse.json({ storagePath: data.path, fileName: file.name })
 }

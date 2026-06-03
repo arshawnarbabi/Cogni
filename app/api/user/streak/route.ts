@@ -1,5 +1,6 @@
 import { createClient, createServiceClient } from '@/lib/supabase/server'
 import { addDaysToDateKey, dateKeyInTimeZone } from '@/lib/time'
+import { serverError } from '@/lib/api-error'
 import { NextResponse } from 'next/server'
 
 export async function POST() {
@@ -31,7 +32,7 @@ export async function POST() {
     .from('users')
     .update({ study_streak: newStreak, last_study_date: today })
     .eq('user_id', user.id)
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+  if (error) return serverError('user/streak POST', error)
 
   return NextResponse.json({ ok: true, streak: newStreak })
 }

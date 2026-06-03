@@ -1,5 +1,6 @@
 import { createClient, createServiceClient } from '@/lib/supabase/server'
 import { runProfiler } from '@/lib/agents/profiler'
+import { aiRouteGuard } from '@/lib/rate-limit'
 import { NextResponse } from 'next/server'
 
 // POST { courseId } — re-runs the profiler on the first Tier 1 material for the course.
@@ -10,6 +11,11 @@ export async function POST(request: Request) {
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
+  // Reject suspended accounts + enforce the shared 'profiler' daily cap — this
+  // on-demand re-run would otherwise bypass the cap applied at onboarding/create.
+  const guard = await aiRouteGuard(user.id, 'profiler')
+  if (guard) return NextResponse.json({ error: guard.error }, { status: guard.status })
 
   const service = createServiceClient()
 

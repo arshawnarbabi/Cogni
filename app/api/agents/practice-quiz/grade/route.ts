@@ -2,6 +2,8 @@ import { createClient } from '@/lib/supabase/server'
 import { getUserApiKey } from '@/lib/vault'
 import { gradeAndRecord, type QuizQuestion } from '@/lib/agents/practice-quiz'
 import { requireOwnedCourse } from '@/lib/authz'
+import { aiRouteGuard } from '@/lib/rate-limit'
+import { serverError } from '@/lib/api-error'
 import { NextResponse } from 'next/server'
 
 // Grading short-answer questions makes one model call per question; bound the
@@ -37,6 +39,12 @@ export async function POST(request: Request) {
   const ownedCourse = await requireOwnedCourse(user.id, courseId)
   if (!ownedCourse) return NextResponse.json({ error: 'Course not found' }, { status: 404 })
 
+  // Reject suspended accounts + enforce the daily grading cap. Grading uses its
+  // own 'grade' bucket (separate from quiz/exam generation) so a user who hit the
+  // generation cap can still grade what they already generated.
+  const guard = await aiRouteGuard(user.id, 'grade')
+  if (guard) return NextResponse.json({ error: guard.error }, { status: guard.status })
+
   const apiKey = await getUserApiKey(user.id)
 
   try {
@@ -53,6 +61,6 @@ export async function POST(request: Request) {
     )
     return NextResponse.json(summary)
   } catch (err) {
-    return NextResponse.json({ error: String(err) }, { status: 500 })
+    return serverError('practice-quiz/grade', err)
   }
 }

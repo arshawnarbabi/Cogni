@@ -1,6 +1,7 @@
 import { createClient, createServiceClient } from '@/lib/supabase/server'
 import { cleanupCogniCalendar } from '@/lib/calendar'
 import { deleteUserSecret } from '@/lib/vault'
+import { serverError } from '@/lib/api-error'
 import { NextResponse } from 'next/server'
 
 export async function POST() {
@@ -20,10 +21,7 @@ export async function POST() {
     .delete()
     .eq('user_id', user.id)
     .eq('provider', 'google')
-  if (error) {
-    console.error('[calendar] disconnect delete failed:', error)
-    return NextResponse.json({ error: error.message }, { status: 500 })
-  }
+  if (error) return serverError('calendar/disconnect', error)
 
   // Only remove the Vault OAuth tokens after the row delete is confirmed.
   // Best-effort — a vault error must not leave the user unable to disconnect.

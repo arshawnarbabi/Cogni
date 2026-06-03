@@ -1,4 +1,5 @@
 import { createClient, createServiceClient } from '@/lib/supabase/server'
+import { serverError } from '@/lib/api-error'
 import { NextResponse } from 'next/server'
 
 // PATCH { action: 'resolve' | 'snooze' }
@@ -34,14 +35,14 @@ export async function PATCH(
       status: 'resolved',
       resolved_at: new Date().toISOString(),
     }).eq('nudge_id', nudgeId).eq('user_id', user.id)
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+    if (error) return serverError('nudges.PATCH.resolve', error)
   } else {
     const snoozedUntil = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString()
     const { error } = await service.from('nudges').update({
       status: 'snoozed',
       snoozed_until: snoozedUntil,
     }).eq('nudge_id', nudgeId).eq('user_id', user.id)
-    if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+    if (error) return serverError('nudges.PATCH.snooze', error)
   }
 
   return NextResponse.json({ ok: true })

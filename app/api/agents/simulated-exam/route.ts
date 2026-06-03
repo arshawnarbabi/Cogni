@@ -2,6 +2,7 @@ import { createClient } from '@/lib/supabase/server'
 import { generateSimulatedExam } from '@/lib/agents/practice-quiz'
 import { requireOwnedCourse } from '@/lib/authz'
 import { aiRouteGuard } from '@/lib/rate-limit'
+import { serverError } from '@/lib/api-error'
 import { NextResponse } from 'next/server'
 
 const MOCK_EXAM = {
@@ -88,6 +89,6 @@ export async function POST(request: Request) {
     const result = await generateSimulatedExam(user.id, courseId, courseName)
     return NextResponse.json(result)
   } catch (err) {
-    return NextResponse.json({ error: String(err) }, { status: 500 })
+    return serverError('simulated-exam', err)
   }
 }

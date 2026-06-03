@@ -1,4 +1,5 @@
 import { createClient, createServiceClient } from '@/lib/supabase/server'
+import { serverError } from '@/lib/api-error'
 import { NextResponse } from 'next/server'
 
 export async function DELETE(
@@ -26,7 +27,7 @@ export async function DELETE(
   // Delete from storage
   if (material.storage_path) {
     const { error: storageError } = await service.storage.from('materials').remove([material.storage_path])
-    if (storageError) return NextResponse.json({ error: storageError.message }, { status: 500 })
+    if (storageError) return serverError('materials.DELETE.storage', storageError)
   }
 
   // Delete DB row (cascades to embeddings if foreign key is set)
@@ -35,7 +36,7 @@ export async function DELETE(
     .delete()
     .eq('material_id', materialId)
     .eq('user_id', user.id)
-  if (deleteError) return NextResponse.json({ error: deleteError.message }, { status: 500 })
+  if (deleteError) return serverError('materials.DELETE', deleteError)
 
   return NextResponse.json({ ok: true })
 }

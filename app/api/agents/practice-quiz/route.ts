@@ -2,6 +2,7 @@ import { createClient } from '@/lib/supabase/server'
 import { generatePracticeQuiz, type QuizFormat } from '@/lib/agents/practice-quiz'
 import { requireOwnedCourse } from '@/lib/authz'
 import { aiRouteGuard } from '@/lib/rate-limit'
+import { serverError } from '@/lib/api-error'
 import { NextResponse } from 'next/server'
 
 const MOCK_QUESTIONS = [
@@ -76,6 +77,6 @@ export async function POST(request: Request) {
     )
     return NextResponse.json({ questions })
   } catch (err) {
-    return NextResponse.json({ error: String(err) }, { status: 500 })
+    return serverError('practice-quiz', err)
   }
 }

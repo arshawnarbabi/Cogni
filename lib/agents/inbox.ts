@@ -7,6 +7,7 @@ import { runProfiler } from '@/lib/agents/profiler'
 import { runFlashcardAgent } from '@/lib/agents/flashcard'
 import { processEmbeddings } from '@/lib/rag'
 import { requireOwnedCourse } from '@/lib/authz'
+import { consumeAiQuota } from '@/lib/rate-limit'
 
 type ClassifyResult = {
   courseId: string | null
@@ -296,15 +297,26 @@ export async function classifyMaterial(
     await processEmbeddings(userId, materialId, ragContent).catch(e => console.error('[rag] processEmbeddings failed', e))
   }
 
-  // Auto-run profiler for syllabuses (tier 1) that were successfully classified
+  // Auto-run profiler for syllabuses (tier 1) that were successfully classified.
+  // Charge it to its own 'profiler' bucket so inbox uploads can't bypass the
+  // profiler cap that onboarding/course-create enforce (inbox already consumed
+  // one 'inbox_classify' unit upstream).
   if (tier === 1 && courseId) {
     const courseName2 = (courses ?? []).find((c: { course_id: string; name: string }) => c.course_id === courseId)?.name ?? 'Course'
-    await runProfiler(userId, materialId, courseId, courseName2)
+    if (await consumeAiQuota(userId, 'profiler')) {
+      await runProfiler(userId, materialId, courseId, courseName2)
+    } else {
+      console.warn(`[inbox] profiler skipped for ${userId} — daily AI cap reached`)
+    }
   }
 
-  // Auto-generate flashcards for tier 1 or 2 materials
+  // Auto-generate flashcards for tier 1 or 2 materials (own 'flashcards' bucket).
   if ((tier === 1 || tier === 2) && courseId && classificationStatus === 'classified') {
-    autoGenerateFlashcards(userId, courseId).catch(() => {})
+    if (await consumeAiQuota(userId, 'flashcards')) {
+      autoGenerateFlashcards(userId, courseId).catch(() => {})
+    } else {
+      console.warn(`[inbox] flashcard auto-gen skipped for ${userId} — daily AI cap reached`)
+    }
   }
 
   return { courseId, tier, status: classificationStatus, isHomework, dueDate }

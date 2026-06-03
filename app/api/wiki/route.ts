@@ -1,4 +1,5 @@
 import { createClient, createServiceClient } from '@/lib/supabase/server'
+import { serverError } from '@/lib/api-error'
 import { NextResponse } from 'next/server'
 
 const BUCKET = 'wiki'
@@ -26,7 +27,7 @@ export async function GET() {
 
   const service = createServiceClient()
   const { data: files, error } = await service.storage.from(BUCKET).list(user.id, { limit: 100 })
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+  if (error) return serverError('wiki GET', error)
 
   type StorageFile = { name: string; updated_at?: string; created_at?: string }
   const visible = (files ?? []).filter((f: StorageFile) => !HIDDEN.has(f.name))
@@ -64,7 +65,7 @@ export async function PATCH(request: Request) {
     .from(BUCKET)
     .upload(`${user.id}/${filename}`, new Blob([content], { type: 'text/markdown' }), { upsert: true })
 
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+  if (error) return serverError('wiki PATCH', error)
 
   // Version record
   await service.from('wiki_versions').insert({
@@ -91,7 +92,7 @@ export async function DELETE(request: Request) {
 
   const service = createServiceClient()
   const { error } = await service.storage.from(BUCKET).remove([`${user.id}/${filename}`])
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+  if (error) return serverError('wiki DELETE', error)
 
   return NextResponse.json({ ok: true })
 }

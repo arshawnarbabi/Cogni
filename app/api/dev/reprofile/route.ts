@@ -1,5 +1,6 @@
 import { createClient, createServiceClient } from '@/lib/supabase/server'
 import { runProfiler } from '@/lib/agents/profiler'
+import { serverError } from '@/lib/api-error'
 import { NextResponse } from 'next/server'
 
 export async function POST() {
@@ -19,7 +20,7 @@ export async function POST() {
     .eq('user_id', user.id)
     .eq('tier', 1)
 
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+  if (error) return serverError('dev/reprofile', error)
   if (!materials || materials.length === 0) {
     return NextResponse.json({ error: 'No tier-1 materials to re-profile' }, { status: 404 })
   }

@@ -1,6 +1,7 @@
 import { createClient, createServiceClient } from '@/lib/supabase/server'
 import { scheduleReview } from '@/lib/fsrs'
 import { NextResponse } from 'next/server'
+import { serverError } from '@/lib/api-error'
 
 export async function POST(request: Request) {
   const { cardId, rating } = await request.json() as { cardId: string; rating: 1 | 2 | 3 | 4 }
@@ -60,7 +61,7 @@ export async function POST(request: Request) {
   })
 
   if (rpcError) {
-    return NextResponse.json({ error: rpcError.message }, { status: 500 })
+    return serverError('cards/review', rpcError)
   }
 
   return NextResponse.json({ ok: true, nextDue: next.fsrs_next_review_date })

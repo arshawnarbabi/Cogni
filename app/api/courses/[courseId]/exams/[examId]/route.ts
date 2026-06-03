@@ -1,5 +1,6 @@
 import { createClient, createServiceClient } from '@/lib/supabase/server'
 import { NextResponse } from 'next/server'
+import { serverError } from '@/lib/api-error'
 
 export async function PATCH(
   request: Request,
@@ -26,7 +27,7 @@ export async function PATCH(
     .eq('user_id', user.id)
     .select('exam_id')
 
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+  if (error) return serverError('courses/exams/update', error)
   if (!data || data.length === 0) return NextResponse.json({ error: 'Exam not found' }, { status: 404 })
 
   return NextResponse.json({ ok: true })
