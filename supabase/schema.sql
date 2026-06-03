@@ -1,6 +1,7 @@
 -- ============================================================
 -- COGNI — FULL DATABASE SCHEMA
 -- Run this entire file in the Supabase SQL editor
+-- Idempotent: safe to run more than once (create-if-not-exists + drop/create policies).
 -- ============================================================
 
 -- Enable pgvector for RAG embeddings
@@ -11,18 +12,19 @@ create extension if not exists vector;
 -- ============================================================
 
 -- Users (extends Supabase auth.users)
-create table public.users (
+create table if not exists public.users (
   user_id uuid primary key references auth.users(id) on delete cascade,
   display_name text not null,
   university text,
   major text,
   year text,
   session_length_preference integer not null default 45, -- minutes: 25, 45, or 90
+  timezone text not null default 'UTC',
   created_at timestamptz not null default now()
 );
 
 -- Professors (independent entities, persist across semesters)
-create table public.professors (
+create table if not exists public.professors (
   professor_id uuid primary key default gen_random_uuid(),
   user_id uuid not null references public.users(user_id) on delete cascade,
   name text not null,
@@ -32,7 +34,7 @@ create table public.professors (
 );
 
 -- Courses
-create table public.courses (
+create table if not exists public.courses (
   course_id uuid primary key default gen_random_uuid(),
   user_id uuid not null references public.users(user_id) on delete cascade,
   professor_id uuid references public.professors(professor_id) on delete set null,
@@ -45,7 +47,7 @@ create table public.courses (
 );
 
 -- Topics (created from syllabus, core of the four-number framework)
-create table public.topics (
+create table if not exists public.topics (
   topic_id uuid primary key default gen_random_uuid(),
   course_id uuid not null references public.courses(course_id) on delete cascade,
   user_id uuid not null references public.users(user_id) on delete cascade,
@@ -61,7 +63,7 @@ create table public.topics (
 );
 
 -- Topic Mastery (mastery score per topic per student)
-create table public.topic_mastery (
+create table if not exists public.topic_mastery (
   mastery_id uuid primary key default gen_random_uuid(),
   user_id uuid not null references public.users(user_id) on delete cascade,
   topic_id uuid not null references public.topics(topic_id) on delete cascade,
@@ -72,7 +74,7 @@ create table public.topic_mastery (
 );
 
 -- Flashcards (card-level FSRS)
-create table public.flashcards (
+create table if not exists public.flashcards (
   card_id uuid primary key default gen_random_uuid(),
   user_id uuid not null references public.users(user_id) on delete cascade,
   course_id uuid not null references public.courses(course_id) on delete cascade,
@@ -93,7 +95,7 @@ create table public.flashcards (
 );
 
 -- Exams
-create table public.exams (
+create table if not exists public.exams (
   exam_id uuid primary key default gen_random_uuid(),
   course_id uuid not null references public.courses(course_id) on delete cascade,
   user_id uuid not null references public.users(user_id) on delete cascade,
@@ -106,7 +108,7 @@ create table public.exams (
 );
 
 -- Assignments / Homework
-create table public.assignments (
+create table if not exists public.assignments (
   assignment_id uuid primary key default gen_random_uuid(),
   course_id uuid not null references public.courses(course_id) on delete cascade,
   user_id uuid not null references public.users(user_id) on delete cascade,
@@ -118,7 +120,7 @@ create table public.assignments (
 );
 
 -- Materials (uploaded files and typed content)
-create table public.materials (
+create table if not exists public.materials (
   material_id uuid primary key default gen_random_uuid(),
   user_id uuid not null references public.users(user_id) on delete cascade,
   course_id uuid references public.courses(course_id) on delete set null,
@@ -132,7 +134,7 @@ create table public.materials (
 );
 
 -- Inbox Items (raw classification queue)
-create table public.inbox_items (
+create table if not exists public.inbox_items (
   inbox_item_id uuid primary key default gen_random_uuid(),
   user_id uuid not null references public.users(user_id) on delete cascade,
   material_id uuid references public.materials(material_id) on delete cascade,
@@ -145,7 +147,7 @@ create table public.inbox_items (
 );
 
 -- Tutor Session Log
-create table public.session_log (
+create table if not exists public.session_log (
   session_id uuid primary key default gen_random_uuid(),
   user_id uuid not null references public.users(user_id) on delete cascade,
   course_id uuid not null references public.courses(course_id) on delete cascade,
@@ -158,7 +160,7 @@ create table public.session_log (
 );
 
 -- Tutor Messages (per session)
-create table public.session_messages (
+create table if not exists public.session_messages (
   message_id uuid primary key default gen_random_uuid(),
   session_id uuid not null references public.session_log(session_id) on delete cascade,
   user_id uuid not null references public.users(user_id) on delete cascade,
@@ -168,7 +170,7 @@ create table public.session_messages (
 );
 
 -- Nudges
-create table public.nudges (
+create table if not exists public.nudges (
   nudge_id uuid primary key default gen_random_uuid(),
   user_id uuid not null references public.users(user_id) on delete cascade,
   type text not null, -- homework_completion, material_gap, pending_classification, missing_api_key, missing_syllabus, calendar_conflict, upload_content
@@ -182,7 +184,7 @@ create table public.nudges (
 );
 
 -- Wiki Versions (snapshot table for recovery)
-create table public.wiki_versions (
+create table if not exists public.wiki_versions (
   version_id uuid primary key default gen_random_uuid(),
   user_id uuid not null references public.users(user_id) on delete cascade,
   file_path text not null, -- e.g. 'learning_profile.md', 'professor_abc123.md'
@@ -192,7 +194,7 @@ create table public.wiki_versions (
 );
 
 -- Study Plan (daily generated plan)
-create table public.study_plan (
+create table if not exists public.study_plan (
   plan_id uuid primary key default gen_random_uuid(),
   user_id uuid not null references public.users(user_id) on delete cascade,
   plan_date date not null,
@@ -202,7 +204,7 @@ create table public.study_plan (
 );
 
 -- Mastery History (for 30-day trend lines in Progress tab)
-create table public.mastery_history (
+create table if not exists public.mastery_history (
   history_id uuid primary key default gen_random_uuid(),
   user_id uuid not null references public.users(user_id) on delete cascade,
   topic_id uuid not null references public.topics(topic_id) on delete cascade,
@@ -211,7 +213,7 @@ create table public.mastery_history (
 );
 
 -- Vector Embeddings (RAG via pgvector)
-create table public.material_embeddings (
+create table if not exists public.material_embeddings (
   embedding_id uuid primary key default gen_random_uuid(),
   user_id uuid not null references public.users(user_id) on delete cascade,
   material_id uuid not null references public.materials(material_id) on delete cascade,
@@ -245,87 +247,105 @@ alter table public.material_embeddings enable row level security;
 
 -- ============================================================
 -- RLS POLICIES (all scoped to auth.uid())
+-- drop-then-create so the file is re-runnable (CREATE POLICY has no IF NOT EXISTS)
 -- ============================================================
 
 -- Users
+drop policy if exists "users: own row only" on public.users;
 create policy "users: own row only" on public.users
   for all using (auth.uid() = user_id);
 
 -- Professors
+drop policy if exists "professors: own rows only" on public.professors;
 create policy "professors: own rows only" on public.professors
   for all using (auth.uid() = user_id);
 
 -- Courses
+drop policy if exists "courses: own rows only" on public.courses;
 create policy "courses: own rows only" on public.courses
   for all using (auth.uid() = user_id);
 
 -- Topics
+drop policy if exists "topics: own rows only" on public.topics;
 create policy "topics: own rows only" on public.topics
   for all using (auth.uid() = user_id);
 
 -- Topic Mastery
+drop policy if exists "topic_mastery: own rows only" on public.topic_mastery;
 create policy "topic_mastery: own rows only" on public.topic_mastery
   for all using (auth.uid() = user_id);
 
 -- Flashcards
+drop policy if exists "flashcards: own rows only" on public.flashcards;
 create policy "flashcards: own rows only" on public.flashcards
   for all using (auth.uid() = user_id);
 
 -- Exams
+drop policy if exists "exams: own rows only" on public.exams;
 create policy "exams: own rows only" on public.exams
   for all using (auth.uid() = user_id);
 
 -- Assignments
+drop policy if exists "assignments: own rows only" on public.assignments;
 create policy "assignments: own rows only" on public.assignments
   for all using (auth.uid() = user_id);
 
 -- Materials
+drop policy if exists "materials: own rows only" on public.materials;
 create policy "materials: own rows only" on public.materials
   for all using (auth.uid() = user_id);
 
 -- Inbox Items
+drop policy if exists "inbox_items: own rows only" on public.inbox_items;
 create policy "inbox_items: own rows only" on public.inbox_items
   for all using (auth.uid() = user_id);
 
 -- Session Log
+drop policy if exists "session_log: own rows only" on public.session_log;
 create policy "session_log: own rows only" on public.session_log
   for all using (auth.uid() = user_id);
 
 -- Session Messages
+drop policy if exists "session_messages: own rows only" on public.session_messages;
 create policy "session_messages: own rows only" on public.session_messages
   for all using (auth.uid() = user_id);
 
 -- Nudges
+drop policy if exists "nudges: own rows only" on public.nudges;
 create policy "nudges: own rows only" on public.nudges
   for all using (auth.uid() = user_id);
 
 -- Wiki Versions
+drop policy if exists "wiki_versions: own rows only" on public.wiki_versions;
 create policy "wiki_versions: own rows only" on public.wiki_versions
   for all using (auth.uid() = user_id);
 
 -- Study Plan
+drop policy if exists "study_plan: own rows only" on public.study_plan;
 create policy "study_plan: own rows only" on public.study_plan
   for all using (auth.uid() = user_id);
 
 -- Mastery History
+drop policy if exists "mastery_history: own rows only" on public.mastery_history;
 create policy "mastery_history: own rows only" on public.mastery_history
   for all using (auth.uid() = user_id);
 
 -- Material Embeddings
+drop policy if exists "material_embeddings: own rows only" on public.material_embeddings;
 create policy "material_embeddings: own rows only" on public.material_embeddings
   for all using (auth.uid() = user_id);
 
 -- ============================================================
--- INDEXES (performance)
+-- INDEXES (performance) — named + if-not-exists so re-runs are safe
 -- ============================================================
 
-create index on public.topics(course_id);
-create index on public.topic_mastery(user_id, topic_id);
-create index on public.flashcards(user_id, course_id);
-create index on public.flashcards(fsrs_next_review_date);
-create index on public.exams(course_id, date);
-create index on public.assignments(user_id, due_date);
-create index on public.nudges(user_id, status);
-create index on public.session_log(user_id, course_id);
-create index on public.mastery_history(user_id, topic_id, recorded_at);
-create index on public.material_embeddings using ivfflat (embedding vector_cosine_ops);
+create index if not exists idx_topics_course_id on public.topics(course_id);
+create index if not exists idx_topic_mastery_user_topic on public.topic_mastery(user_id, topic_id);
+create index if not exists idx_flashcards_user_course on public.flashcards(user_id, course_id);
+create index if not exists idx_flashcards_due on public.flashcards(fsrs_next_review_date);
+create index if not exists idx_exams_course_date on public.exams(course_id, date);
+create index if not exists idx_assignments_user_due on public.assignments(user_id, due_date);
+create index if not exists idx_nudges_user_status on public.nudges(user_id, status);
+create index if not exists idx_session_log_user_course on public.session_log(user_id, course_id);
+create index if not exists idx_mastery_history_user_topic_recorded on public.mastery_history(user_id, topic_id, recorded_at);
+create index if not exists idx_material_embeddings_embedding on public.material_embeddings using ivfflat (embedding vector_cosine_ops);

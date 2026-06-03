@@ -102,6 +102,9 @@ export async function POST(request: Request) {
 
   const { html, title } = await request.json() as { html: string; title?: string }
 
+  if (typeof html !== 'string') return NextResponse.json({ error: 'Missing html' }, { status: 400 })
+  if (html.length > 1_000_000) return NextResponse.json({ error: 'Document too large' }, { status: 413 })
+
   const doc = (
     <Document>
       <Page size="LETTER" style={styles.page}>
@@ -114,10 +117,12 @@ export async function POST(request: Request) {
 
   const buffer = await renderToBuffer(doc)
 
+  const safeTitle = (title ?? 'essay').replace(/[^a-zA-Z0-9 _-]/g, '_').slice(0, 100).trim() || 'essay'
+
   return new Response(new Uint8Array(buffer), {
     headers: {
       'Content-Type': 'application/pdf',
-      'Content-Disposition': `attachment; filename="${title ?? 'essay'}.pdf"`,
+      'Content-Disposition': `attachment; filename="${safeTitle}.pdf"`,
     },
   })
 }

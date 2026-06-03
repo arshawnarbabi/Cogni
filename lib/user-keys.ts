@@ -1,7 +1,14 @@
 import { createServiceClient } from '@/lib/supabase/server'
 import { createClient } from '@/lib/supabase/server'
+import { getUserSecret, setUserSecret, deleteUserSecret } from '@/lib/vault'
+
+const ALLOWED_KEYS = new Set(['openai_key'])
 
 export async function getUserKey(userId: string, keyName: string): Promise<string | null> {
+  if (!ALLOWED_KEYS.has(keyName)) return null
+  const vaultValue = await getUserSecret(userId, keyName)
+  if (vaultValue) return vaultValue
+
   const service = createServiceClient()
   const { data } = await service
     .from('user_keys')
@@ -13,14 +20,17 @@ export async function getUserKey(userId: string, keyName: string): Promise<strin
 }
 
 export async function setUserKey(userId: string, keyName: string, value: string): Promise<void> {
+  if (!ALLOWED_KEYS.has(keyName)) throw new Error('Unsupported key')
+  await setUserSecret(userId, keyName, value)
+
   const service = createServiceClient()
-  await service.from('user_keys').upsert(
-    { user_id: userId, key_name: keyName, key_value: value, updated_at: new Date().toISOString() },
-    { onConflict: 'user_id,key_name' }
-  )
+  await service.from('user_keys').delete().eq('user_id', userId).eq('key_name', keyName)
 }
 
 export async function deleteUserKey(userId: string, keyName: string): Promise<void> {
+  if (!ALLOWED_KEYS.has(keyName)) return
+  await deleteUserSecret(userId, keyName)
+
   const service = createServiceClient()
   await service.from('user_keys').delete().eq('user_id', userId).eq('key_name', keyName)
 }

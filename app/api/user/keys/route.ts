@@ -26,8 +26,14 @@ export async function POST(request: Request) {
 
   const { key, value } = await request.json() as { key: string; value: string }
   if (!key || !value?.trim()) return NextResponse.json({ error: 'Missing key or value' }, { status: 400 })
+  if (key !== 'openai_key') return NextResponse.json({ error: 'Unsupported key' }, { status: 400 })
 
-  await setUserKey(user.id, key, value.trim())
+  try {
+    await setUserKey(user.id, key, value.trim())
+  } catch (e) {
+    console.error('[user/keys] setUserKey failed:', e)
+    return NextResponse.json({ error: 'Failed to store key.' }, { status: 500 })
+  }
   return NextResponse.json({ ok: true })
 }
 
@@ -38,7 +44,13 @@ export async function DELETE(request: Request) {
 
   const { key } = await request.json() as { key: string }
   if (!key) return NextResponse.json({ error: 'Missing key' }, { status: 400 })
+  if (key !== 'openai_key') return NextResponse.json({ error: 'Unsupported key' }, { status: 400 })
 
-  await deleteUserKey(user.id, key)
+  try {
+    await deleteUserKey(user.id, key)
+  } catch (e) {
+    console.error('[user/keys] deleteUserKey failed:', e)
+    return NextResponse.json({ error: 'Failed to delete key.' }, { status: 500 })
+  }
   return NextResponse.json({ ok: true })
 }

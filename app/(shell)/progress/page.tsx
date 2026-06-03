@@ -1,6 +1,37 @@
 import { createClient, createServiceClient } from '@/lib/supabase/server'
 import { redirect } from 'next/navigation'
 import { ProgressClient } from './_client'
+import { dateKeyInTimeZone } from '@/lib/time'
+
+type MasteryRow = { mastery_score: number | null }
+type ProgressTopicRow = {
+  topic_id: string
+  name: string
+  topic_mastery?: MasteryRow[] | null
+}
+type ProgressCourseRow = {
+  course_id: string
+  name: string
+  icon?: string | null
+  icon_color?: string | null
+  topics?: ProgressTopicRow[] | null
+}
+type TestResultRow = {
+  result_id: string
+  test_type: 'practice_quiz' | 'simulated_exam'
+  score_pct: number | null
+  question_count: number
+  correct_count: number
+  topic_filter: string | null
+  created_at: string
+  courses?: { name: string } | { name: string }[] | null
+}
+type MasteryHistoryRow = {
+  mastery_score: number | null
+  recorded_at: string
+  topic_id: string
+  topics?: { course_id: string } | null
+}
 
 // ── Linear regression ──────────────────────────────────────────────────────────
 function linearRegression(points: { x: number; y: number }[]) {
@@ -28,7 +59,12 @@ export default async function ProgressPage() {
   if (!user) redirect('/auth')
 
   const service = createServiceClient()
-  const today = new Date().toISOString().split('T')[0]
+  const { data: userRow } = await service
+    .from('users')
+    .select('timezone')
+    .eq('user_id', user.id)
+    .single()
+  const today = dateKeyInTimeZone(new Date(), userRow?.timezone ?? 'UTC')
   const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()
 
   const [
@@ -81,9 +117,8 @@ export default async function ProgressPage() {
 
   // ── Build trend map: courseId → date → mastery[] ───────────────────────────
   const trendMap = new Map<string, Map<string, number[]>>()
-  for (const row of historyRows ?? []) {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const courseId = (row.topics as any)?.course_id as string | undefined
+  for (const row of (historyRows ?? []) as MasteryHistoryRow[]) {
+    const courseId = row.topics?.course_id
     if (!courseId) continue
     const dateStr = (row.recorded_at as string).split('T')[0]
     if (!trendMap.has(courseId)) trendMap.set(courseId, new Map())
@@ -125,16 +160,13 @@ export default async function ProgressPage() {
   }
 
   // ── Shape courses ──────────────────────────────────────────────────────────
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const shapedCourses = (courses ?? []).map((c: any) => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const topics = (Array.isArray(c.topics) ? c.topics : []) as any[]
-    const topicIds = topics.map((t: any) => t.topic_id as string)
+  const shapedCourses = ((courses ?? []) as ProgressCourseRow[]).map((c) => {
+    const topics = Array.isArray(c.topics) ? c.topics : []
+    const topicIds = topics.map((t) => t.topic_id)
 
     // Current mastery
     const masteryScores = topics
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      .map((t: any) => {
+      .map((t) => {
         const rows = Array.isArray(t.topic_mastery) ? t.topic_mastery : []
         return rows[0]?.mastery_score != null ? Number(rows[0].mastery_score) : null
       })
@@ -201,9 +233,9 @@ export default async function ProgressPage() {
 
     // Weak topics (mastery < 0.5, sorted ascending)
     const weakTopics = topics
-      .map((t: any) => {
+      .map((t) => {
         const rows = Array.isArray(t.topic_mastery) ? t.topic_mastery : []
-        return { name: t.name as string, mastery: rows[0]?.mastery_score != null ? Number(rows[0].mastery_score) : 0 }
+        return { name: t.name, mastery: rows[0]?.mastery_score != null ? Number(rows[0].mastery_score) : 0 }
       })
       .filter((t: { name: string; mastery: number }) => t.mastery < 0.5)
       .sort((a: { mastery: number }, b: { mastery: number }) => a.mastery - b.mastery)
@@ -224,10 +256,8 @@ export default async function ProgressPage() {
 
   // ── Global weak areas (across all courses) ─────────────────────────────────
   const allWeakAreas: { topic_name: string; course_name: string; mastery: number }[] = []
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  for (const c of courses ?? [] as any[]) {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    for (const t of Array.isArray(c.topics) ? c.topics : [] as any[]) {
+  for (const c of (courses ?? []) as ProgressCourseRow[]) {
+    for (const t of Array.isArray(c.topics) ? c.topics : []) {
       const rows = Array.isArray(t.topic_mastery) ? t.topic_mastery : []
       const score = rows[0]?.mastery_score != null ? Number(rows[0].mastery_score) : 0
       if (score < 0.5) {
@@ -243,7 +273,7 @@ export default async function ProgressPage() {
       courses={shapedCourses}
       weakAreas={topWeakAreas}
       dueToday={flashcardRows?.length ?? 0}
-      testResults={(testResults ?? []).map((r: any) => ({
+      testResults={((testResults ?? []) as TestResultRow[]).map((r) => ({
         result_id: r.result_id,
         test_type: r.test_type,
         score_pct: r.score_pct,

@@ -2,6 +2,7 @@ import { createClient, createServiceClient } from '@/lib/supabase/server'
 import { redirect } from 'next/navigation'
 import { readWikiFile } from '@/lib/wiki'
 import { getUserKey } from '@/lib/user-keys'
+import { dateKeyInTimeZone } from '@/lib/time'
 import { CourseDetailClient } from './_client'
 
 export default async function CourseDetailPage({ params }: { params: Promise<{ courseId: string }> }) {
@@ -12,7 +13,12 @@ export default async function CourseDetailPage({ params }: { params: Promise<{ c
   if (!user) redirect('/auth')
 
   const service = createServiceClient()
-  const today = new Date().toISOString().split('T')[0]
+  const { data: userRow } = await service
+    .from('users')
+    .select('timezone')
+    .eq('user_id', user.id)
+    .single()
+  const today = dateKeyInTimeZone(new Date(), userRow?.timezone ?? 'UTC')
 
   const [courseResult, resultsResult, materialsResult, examsResult, openaiKey] = await Promise.all([
     service

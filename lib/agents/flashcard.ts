@@ -66,6 +66,8 @@ export async function runFlashcardAgent(
     .from('topics')
     .select('name, courses ( name )')
     .eq('topic_id', topicId)
+    .eq('user_id', userId)
+    .eq('course_id', courseId)
     .single()
 
   if (!topic) return { generated: 0, error: 'Topic not found' }
@@ -137,6 +139,7 @@ export async function runFlashcardAgent(
     .from('topics')
     .update({ content_coverage: coverage })
     .eq('topic_id', topicId)
+    .eq('user_id', userId)
 
   await appendToLog(userId, `Flashcard agent generated ${cards.length} cards for topic "${topicName}"`)
 

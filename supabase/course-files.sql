@@ -18,6 +18,7 @@ create table if not exists public.course_files (
 -- RLS
 alter table public.course_files enable row level security;
 
+drop policy if exists "owner_all" on public.course_files;
 create policy "owner_all" on public.course_files
   for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
 
@@ -37,14 +38,17 @@ values ('course-files', 'course-files', false)
 on conflict (id) do nothing;
 
 -- Allow authenticated users to upload/read/delete their own files
+drop policy if exists "owner_upload" on storage.objects;
 create policy "owner_upload" on storage.objects
   for insert to authenticated
   with check (bucket_id = 'course-files' and auth.uid()::text = (storage.foldername(name))[1]);
 
+drop policy if exists "owner_read" on storage.objects;
 create policy "owner_read" on storage.objects
   for select to authenticated
   using (bucket_id = 'course-files' and auth.uid()::text = (storage.foldername(name))[1]);
 
+drop policy if exists "owner_delete" on storage.objects;
 create policy "owner_delete" on storage.objects
   for delete to authenticated
   using (bucket_id = 'course-files' and auth.uid()::text = (storage.foldername(name))[1]);

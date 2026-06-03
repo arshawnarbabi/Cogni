@@ -3,6 +3,39 @@ import { redirect } from 'next/navigation'
 import { readWikiFile } from '@/lib/wiki'
 import { CoursesClient } from './_client'
 
+type CourseTopicRow = {
+  topic_id: string
+  content_coverage?: number | null
+  topic_mastery?: { mastery_score: number | null }[] | null
+  flashcards?: { card_id: string }[] | null
+}
+
+type CourseRow = {
+  course_id: string
+  name: string
+  icon?: string | null
+  icon_color?: string | null
+  professor_id?: string | null
+  professors?: { name: string } | { name: string }[] | null
+  topics?: CourseTopicRow[] | null
+  materials?: { material_id: string; tier: number | null }[] | null
+}
+
+type ShapedCourse = {
+  course_id: string
+  name: string
+  icon: string | null
+  icon_color: string | null
+  professor_id: string | null
+  professor_name: string | null
+  topic_count: number
+  card_count: number
+  avg_coverage: number
+  avg_mastery: number
+  material_count: number
+  has_primary_material: boolean
+}
+
 export default async function CoursesPage() {
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
@@ -44,30 +77,26 @@ export default async function CoursesPage() {
       .order('created_at', { ascending: true }),
   ])
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  function shapeCourse(c: any) {
+  function shapeCourse(c: CourseRow) {
     const profName = Array.isArray(c.professors)
       ? c.professors[0]?.name ?? null
       : c.professors?.name ?? null
 
     const topics = Array.isArray(c.topics) ? c.topics : []
     const cardCount = topics.reduce(
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (sum: number, t: any) => sum + (Array.isArray(t.flashcards) ? t.flashcards.length : 0),
+      (sum: number, t: CourseTopicRow) => sum + (Array.isArray(t.flashcards) ? t.flashcards.length : 0),
       0,
     )
     const avgCoverage =
       topics.length > 0
         ? topics.reduce(
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            (sum: number, t: any) => sum + Number(t.content_coverage ?? 0),
+            (sum: number, t: CourseTopicRow) => sum + Number(t.content_coverage ?? 0),
             0,
           ) / topics.length
         : 0
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const masteryScores = topics.flatMap((t: any) =>
-      Array.isArray(t.topic_mastery) ? t.topic_mastery.map((m: any) => Number(m.mastery_score ?? 0)) : []
+    const masteryScores = topics.flatMap((t: CourseTopicRow) =>
+      Array.isArray(t.topic_mastery) ? t.topic_mastery.map((m: { mastery_score: number | null }) => Number(m.mastery_score ?? 0)) : []
     )
     const avgMastery = masteryScores.length > 0
       ? masteryScores.reduce((s: number, v: number) => s + v, 0) / masteryScores.length
@@ -85,7 +114,7 @@ export default async function CoursesPage() {
       avg_coverage: avgCoverage,
       avg_mastery: avgMastery,
       material_count: Array.isArray(c.materials) ? c.materials.length : 0,
-      has_primary_material: Array.isArray(c.materials) && c.materials.some((m: { tier: number }) => m.tier >= 2),
+      has_primary_material: Array.isArray(c.materials) && c.materials.some((m) => Number(m.tier ?? 0) >= 2),
     }
   }
 
@@ -93,8 +122,7 @@ export default async function CoursesPage() {
 
   // Read professor wiki for archived courses (server-side only)
   const archivedWithWiki = await Promise.all(
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    shapedArchived.map(async (c: any) => {
+    shapedArchived.map(async (c: ShapedCourse) => {
       const wiki = c.professor_id
         ? await readWikiFile(user.id, `professor_${c.professor_id}.md`)
         : null

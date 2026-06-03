@@ -1,4 +1,5 @@
 import { createClient, createServiceClient } from '@/lib/supabase/server'
+import { setUserSecret } from '@/lib/vault'
 import { NextResponse } from 'next/server'
 import { NextRequest } from 'next/server'
 
@@ -41,11 +42,16 @@ export async function GET(request: NextRequest) {
   const expiresAt = new Date(Date.now() + tokens.expires_in * 1000).toISOString()
 
   const service = createServiceClient()
+  await setUserSecret(user.id, 'google_calendar_access_token', tokens.access_token)
+  if (tokens.refresh_token) {
+    await setUserSecret(user.id, 'google_calendar_refresh_token', tokens.refresh_token)
+  }
+
   await service.from('calendar_connections').upsert({
     user_id: user.id,
     provider: 'google',
-    access_token: tokens.access_token,
-    refresh_token: tokens.refresh_token ?? null,
+    access_token: '',
+    refresh_token: null,
     expires_at: expiresAt,
     updated_at: new Date().toISOString(),
   }, { onConflict: 'user_id,provider' })

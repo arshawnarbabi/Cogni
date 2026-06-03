@@ -333,6 +333,7 @@ export default function OnboardingClient({ googleName, calendarConnected }: { go
       body: JSON.stringify({
         displayName: name,
         sessionLength,
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
         courses: courses.map((c, i) => ({
           tempIndex: i,
           name: c.name,

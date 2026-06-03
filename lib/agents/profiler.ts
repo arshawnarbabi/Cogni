@@ -3,6 +3,7 @@ import { createServiceClient } from '@/lib/supabase/server'
 import { getUserApiKey } from '@/lib/vault'
 import { readWikiFile, writeWikiFile, appendToLog } from '@/lib/wiki'
 import { retrieveChunks } from '@/lib/rag'
+import { requireOwnedCourse } from '@/lib/authz'
 
 type ExtractedTopic = {
   name: string
@@ -201,6 +202,11 @@ export async function runProfiler(
 ): Promise<void> {
   const tag = `[profiler ${courseName}]`
   const service = createServiceClient()
+  const ownedCourse = await requireOwnedCourse(userId, courseId)
+  if (!ownedCourse) {
+    console.error(`${tag} course ownership check failed`)
+    return
+  }
 
   const apiKey = await getUserApiKey(userId)
   if (!apiKey) {
@@ -212,6 +218,8 @@ export async function runProfiler(
     .from('materials')
     .select('storage_path, filename, file_type')
     .eq('material_id', materialId)
+    .eq('user_id', userId)
+    .eq('course_id', courseId)
     .single()
 
   if (materialError || !material?.storage_path) {
@@ -269,6 +277,7 @@ export async function runProfiler(
     .from('topics')
     .select('topic_id, name')
     .eq('course_id', courseId)
+    .eq('user_id', userId)
 
   const existingNames = new Set((existingTopics ?? []).map((t: { name: string }) => t.name.toLowerCase()))
   const newTopics = extractedTopics.filter(t => !existingNames.has(t.name.toLowerCase()))
@@ -285,6 +294,7 @@ export async function runProfiler(
     await Promise.all(
       weightUpdates.map(u =>
         service.from('topics').update({ professor_weight: u.professor_weight }).eq('topic_id', u.topic_id)
+          .eq('user_id', userId)
       )
     )
   }
@@ -373,6 +383,7 @@ export async function runProfiler(
     .from('courses')
     .select('professor_id, professors ( name )')
     .eq('course_id', courseId)
+    .eq('user_id', userId)
     .single()
 
   const professorId = courseRow?.professor_id as string | null

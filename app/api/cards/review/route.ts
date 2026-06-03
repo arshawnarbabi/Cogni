@@ -26,6 +26,13 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'Card not found' }, { status: 404 })
   }
 
+  const { data: userRow } = await service
+    .from('users')
+    .select('timezone')
+    .eq('user_id', user.id)
+    .single()
+  const timeZone = userRow?.timezone ?? 'UTC'
+
   const next = scheduleReview({
     fsrs_stability: Number(card.fsrs_stability),
     fsrs_difficulty: Number(card.fsrs_difficulty),
@@ -34,7 +41,7 @@ export async function POST(request: Request) {
     fsrs_state: card.fsrs_state,
     fsrs_last_review: card.fsrs_last_review,
     fsrs_next_review_date: card.fsrs_next_review_date,
-  }, rating)
+  }, rating, timeZone)
 
   // Rough mastery bump: Again=-0.1, Hard=+0.02, Good=+0.08, Easy=+0.12. Clamped 0..1 by the RPC.
   const masteryDelta = rating === 1 ? -0.1 : rating === 2 ? 0.02 : rating === 3 ? 0.08 : 0.12

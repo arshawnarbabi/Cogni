@@ -24,10 +24,12 @@ export async function DELETE(
   if (!topic) return NextResponse.json({ error: 'Not found' }, { status: 404 })
 
   // Delete flashcards for this topic explicitly (FK is set null, not cascade)
-  await service.from('flashcards').delete().eq('topic_id', topicId).eq('user_id', user.id)
+  const { error: flashcardError } = await service.from('flashcards').delete().eq('topic_id', topicId).eq('user_id', user.id)
+  if (flashcardError) return NextResponse.json({ error: flashcardError.message }, { status: 500 })
 
   // Delete topic — cascades to topic_mastery
-  await service.from('topics').delete().eq('topic_id', topicId).eq('user_id', user.id)
+  const { error: topicError } = await service.from('topics').delete().eq('topic_id', topicId).eq('user_id', user.id)
+  if (topicError) return NextResponse.json({ error: topicError.message }, { status: 500 })
 
   return NextResponse.json({ ok: true })
 }

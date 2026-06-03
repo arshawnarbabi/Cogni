@@ -32,7 +32,7 @@ export async function runWebEnrichment(
     },
   ]
 
-  let resultText = ''
+  let finalMsg: Anthropic.Message | null = null
   let iterations = 0
 
   try {
@@ -49,18 +49,14 @@ export async function runWebEnrichment(
 
       const stream = client.messages.stream(streamParams)
 
-      for await (const event of stream) {
-        if (
-          event.type === 'content_block_delta' &&
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          (event.delta as any).type === 'text_delta'
-        ) {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          resultText += (event.delta as any).text
-        }
+      // Drain the stream so finalMessage() resolves; the answer is derived
+      // from the final message's text blocks, not a cross-turn accumulator.
+      for await (const _event of stream) {
+        void _event
       }
 
       const final = await stream.finalMessage()
+      finalMsg = final
 
       if (final.stop_reason === 'tool_use') {
         const hasCustomTools = final.content.some(
@@ -72,6 +68,11 @@ export async function runWebEnrichment(
         }
       }
 
+      if (final.stop_reason === 'pause_turn') {
+        messages.push({ role: 'assistant', content: final.content })
+        continue
+      }
+
       break
     }
   } catch (e) {
@@ -79,9 +80,13 @@ export async function runWebEnrichment(
     return
   }
 
-  const trimmed = resultText.trim()
+  const finalText = (finalMsg?.content ?? [])
+    .filter((b): b is Anthropic.TextBlock => b.type === 'text')
+    .map(b => b.text)
+    .join('')
+    .trim()
 
-  if (!trimmed || trimmed === 'NOT_FOUND' || trimmed.length < 100) {
+  if (!finalText || /\bNOT_FOUND\b/.test(finalText) || finalText.length < 100) {
     console.log(`${tag} no useful content found`)
     return
   }
@@ -89,8 +94,8 @@ export async function runWebEnrichment(
   await service.from('course_web_suggestions').insert({
     course_id: courseId,
     user_id: userId,
-    content: trimmed,
+    content: finalText,
   })
 
-  console.log(`${tag} stored web suggestion (${trimmed.length} chars)`)
+  console.log(`${tag} stored web suggestion (${finalText.length} chars)`)
 }

@@ -1,4 +1,6 @@
 import { createServiceClient, createClient } from '@/lib/supabase/server'
+import { requireOwnedCourse, safeStorageFilename } from '@/lib/authz'
+import { hasExpectedFileSignature } from '@/lib/file-validation'
 
 export type CourseFile = {
   file_id: string
@@ -12,12 +14,15 @@ export type CourseFile = {
 
 const BUCKET = 'course-files'
 
-export async function listCourseFiles(courseId: string): Promise<CourseFile[]> {
+export async function listCourseFiles(userId: string, courseId: string): Promise<CourseFile[]> {
+  const course = await requireOwnedCourse(userId, courseId)
+  if (!course) return []
   const service = createServiceClient()
   const { data } = await service
     .from('course_files')
     .select('*')
     .eq('course_id', courseId)
+    .eq('user_id', userId)
     .order('created_at', { ascending: false })
   return (data ?? []) as CourseFile[]
 }
@@ -27,8 +32,16 @@ export async function uploadCourseFile(
   courseId: string,
   file: { name: string; mimeType: string; bytes: Buffer }
 ): Promise<CourseFile> {
+  const course = await requireOwnedCourse(userId, courseId)
+  if (!course) throw new Error('Course not found')
+  const ext = file.name.split('.').pop()?.toLowerCase() ?? ''
+  if (!await hasExpectedFileSignature(file.bytes, ext)) {
+    throw new Error('File contents do not match the file extension.')
+  }
+
   const service = createServiceClient()
-  const storagePath = `${userId}/${courseId}/${Date.now()}_${file.name}`
+  const safeName = safeStorageFilename(file.name)
+  const storagePath = `${userId}/${courseId}/${Date.now()}_${safeName}`
 
   const { error: uploadErr } = await service.storage
     .from(BUCKET)
@@ -70,11 +83,18 @@ export async function deleteCourseFile(userId: string, fileId: string): Promise<
 }
 
 /** Get a signed URL valid for 60 minutes (for in-browser PDF viewing) */
-export async function getFileUrl(storagePath: string): Promise<string> {
+export async function getFileUrl(userId: string, fileId: string): Promise<string> {
   const service = createServiceClient()
+  const { data: file, error: fileError } = await service
+    .from('course_files')
+    .select('storage_path')
+    .eq('file_id', fileId)
+    .eq('user_id', userId)
+    .single()
+  if (fileError || !file?.storage_path) throw new Error('File not found')
   const { data, error } = await service.storage
     .from(BUCKET)
-    .createSignedUrl(storagePath, 3600)
+    .createSignedUrl(file.storage_path, 3600)
   if (error) throw error
   return data.signedUrl
 }
@@ -92,5 +112,5 @@ export async function getMyFiles(courseId: string): Promise<CourseFile[]> {
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) return []
-  return listCourseFiles(courseId)
+  return listCourseFiles(user.id, courseId)
 }

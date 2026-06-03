@@ -2,11 +2,27 @@ import { createServiceClient } from '@/lib/supabase/server'
 
 const BUCKET = 'wiki'
 
+// Defense-in-depth: wiki filenames must be a single safe path segment. Blocks
+// path traversal / cross-prefix writes from any caller (e.g. a prompt-injected
+// agent tool) reaching the service-role storage client. Matches the guard the
+// user-facing /api/wiki route already enforces.
+const WIKI_NAME_RE = /^[a-zA-Z0-9._-]+$/
+function isSafeWikiName(filename: string): boolean {
+  return typeof filename === 'string'
+    && filename.length > 0
+    && filename.length <= 128
+    && !filename.includes('/')
+    && !filename.includes('\\')
+    && !filename.includes('..')
+    && WIKI_NAME_RE.test(filename)
+}
+
 function storagePath(userId: string, filename: string) {
   return `${userId}/${filename}`
 }
 
 export async function readWikiFile(userId: string, filename: string): Promise<string | null> {
+  if (!isSafeWikiName(filename)) return null
   const service = createServiceClient()
   const { data, error } = await service.storage
     .from(BUCKET)
@@ -22,6 +38,7 @@ export async function writeWikiFile(
   content: string,
   triggeredByAgent?: string
 ): Promise<void> {
+  if (!isSafeWikiName(filename)) throw new Error('Unsafe wiki filename')
   const service = createServiceClient()
 
   await service.storage
@@ -38,11 +55,64 @@ export async function writeWikiFile(
   })
 }
 
+const LOG_FILE = 'log.md'
+// Dedicated marker for single-line append rows so re-materialization never picks
+// up full-blob snapshot rows (writeWikiFile / user PATCH both write file_path
+// 'log.md' rows whose content is the WHOLE log) — joining those would duplicate
+// the entire history on every subsequent append.
+const LOG_APPEND_AGENT = 'log_append'
+
+// Renders the log.md storage blob from append-only entry rows (one row per
+// entry) ordered oldest-first, matching the historical newline-joined format.
+function renderLogBlob(rows: Array<{ content: string }>): string {
+  return rows.map(r => r.content).join('\n')
+}
+
+// Append-only log write (Phase 21 lost-update fix).
+//
+// The previous implementation did a read-modify-write of the log.md storage
+// blob, so concurrent writers (e.g. profiler.ts inside Promise.all racing the
+// inbox.ts appends) read the same baseline and the last upload clobbered the
+// others' entries. Here each entry is persisted as its own append-only row in
+// wiki_versions (file_path = 'log.md') via a single INSERT with no prior read,
+// so concurrent appends can never overwrite one another — every entry is
+// durably recorded. The log.md storage blob is then re-materialized from the
+// full ordered set of rows so the existing storage readers (settings page and
+// /api/wiki) keep seeing the complete, up-to-date log. Because the rows are the
+// authoritative source and are never lost, any transient blob-write ordering is
+// self-healing: the next append re-renders the complete set.
 export async function appendToLog(userId: string, entry: string): Promise<void> {
-  const existing = await readWikiFile(userId, 'log.md') ?? ''
+  const service = createServiceClient()
   const timestamp = new Date().toISOString()
-  const newContent = existing + `\n- [${timestamp}] ${entry}`
-  await writeWikiFile(userId, 'log.md', newContent.trimStart(), 'system')
+  const line = `- [${timestamp}] ${entry}`
+
+  // Race-free append: a pure insert, no read-modify-write.
+  await service.from('wiki_versions').insert({
+    user_id: userId,
+    file_path: LOG_FILE,
+    content: line,
+    triggered_by_agent: LOG_APPEND_AGENT,
+  })
+
+  // Re-materialize the storage blob from the committed append-entry rows ONLY
+  // (LOG_APPEND_AGENT) so full-blob snapshot rows from writeWikiFile/PATCH can't
+  // be folded in and duplicate the history. Read immediately before upload so the
+  // blob reflects the latest committed entries, including concurrent appends.
+  const { data: rows } = await service
+    .from('wiki_versions')
+    .select('content')
+    .eq('user_id', userId)
+    .eq('file_path', LOG_FILE)
+    .eq('triggered_by_agent', LOG_APPEND_AGENT)
+    .order('created_at', { ascending: true })
+
+  const blob = renderLogBlob(rows ?? [{ content: line }]).trimStart()
+
+  await service.storage
+    .from(BUCKET)
+    .upload(storagePath(userId, LOG_FILE), new Blob([blob], { type: 'text/markdown' }), {
+      upsert: true,
+    })
 }
 
 const INITIAL_FILES: Record<string, string> = {

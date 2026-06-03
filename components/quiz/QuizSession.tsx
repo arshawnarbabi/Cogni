@@ -763,7 +763,12 @@ export function QuizSession({ courseId, courseName, topicOptions, initialQuestio
           inSession: !!normalizedInitial,  // 30/70 blend for tutor-generated quizzes
         }),
       })
-      const data = await res.json() as GradeSummary
+      const data = await res.json() as GradeSummary & { error?: string }
+      if (!res.ok || data.error || !Array.isArray(data.results) || !Array.isArray(data.missedTopics) || !Array.isArray(data.masteryUpdates)) {
+        setSummary({ correctCount: 0, scorePct: 0, missedTopics: [], masteryUpdates: [], results: [] })
+        setPhase('results')
+        return
+      }
       setSummary(data)
       setPhase('results')
       onComplete?.(data)
@@ -776,7 +781,7 @@ export function QuizSession({ courseId, courseName, topicOptions, initialQuestio
       setSummary({ correctCount: 0, scorePct: 0, missedTopics: [], masteryUpdates: [], results: [] })
       setPhase('results')
     }
-  }, [courseId, examMode, configState.topicFilters, startTime, onComplete])
+  }, [courseId, examMode, configState.topicFilters, startTime, onComplete, normalizedInitial])
 
   useEffect(() => {
     onExpireRef.current = () => submitAnswers(userAnswers, questions)
@@ -804,8 +809,8 @@ export function QuizSession({ courseId, courseName, topicOptions, initialQuestio
         }),
       })
       const data = await res.json() as { questions: QuizQuestion[]; durationMinutes?: number; error?: string }
-      if (data.error) {
-        alert(data.error)
+      if (!res.ok || !Array.isArray(data.questions)) {
+        alert(data.error ?? 'Could not generate questions. Try again.')
         setLoadingConfig(false)
         return
       }
@@ -816,7 +821,7 @@ export function QuizSession({ courseId, courseName, topicOptions, initialQuestio
       setStartTime(Date.now())
       setPhase('quiz')
     } catch {
-      // stay on config
+      alert('Could not generate questions. Try again.')
     } finally {
       setLoadingConfig(false)
     }

@@ -4,13 +4,17 @@ import { runScheduler, generateUpcomingPreview } from '@/lib/agents/scheduler'
 import { runNudgeChecks, getTopNudge } from '@/lib/agents/nudge'
 import { getUserApiKey } from '@/lib/vault'
 import { TodayClient } from './_client'
+import { addDaysToDateKey, dateKeyInTimeZone } from '@/lib/time'
 import type { TaskItem } from '@/lib/agents/scheduler'
 import type { ActiveNudge } from '@/lib/agents/nudge'
 
 export const dynamic = 'force-dynamic'
 
-function greeting(name: string) {
-  const h = new Date().getHours()
+function greeting(name: string, timeZone: string) {
+  // Hour in the user's timezone, not the server's (UTC on Vercel).
+  const h = Number(
+    new Intl.DateTimeFormat('en-US', { timeZone, hour: 'numeric', hour12: false }).format(new Date())
+  ) % 24
   const time = h < 12 ? 'morning' : h < 17 ? 'afternoon' : 'evening'
   return `Good ${time}, ${name}`
 }
@@ -21,7 +25,6 @@ export default async function TodayPage() {
   if (!user) redirect('/auth')
 
   const service = createServiceClient()
-  const today = new Date().toISOString().split('T')[0]
 
   const [
     { data: userRow },
@@ -30,17 +33,30 @@ export default async function TodayPage() {
     apiKey,
     { data: courses },
   ] = await Promise.all([
-    service.from('users').select('display_name, study_streak, last_study_date').eq('user_id', user.id).single(),
-    service.from('study_plan').select('tasks').eq('user_id', user.id).eq('plan_date', today).single(),
+    service.from('users').select('display_name, study_streak, last_study_date, timezone').eq('user_id', user.id).single(),
+    service.from('study_plan').select('tasks').eq('user_id', user.id).eq('plan_date', dateKeyInTimeZone(new Date(), 'UTC')).single(),
     service.from('inbox_items').select('inbox_item_id').eq('user_id', user.id).in('classification_status', ['pending', 'unassigned']),
     getUserApiKey(user.id),
     service.from('courses').select('course_id, name, icon, icon_color').eq('user_id', user.id).eq('active_status', 'active'),
   ])
 
+  const timeZone = userRow?.timezone ?? 'UTC'
+  const today = dateKeyInTimeZone(new Date(), timeZone)
+  let planData = plan
+  if (timeZone !== 'UTC') {
+    const { data: localPlan } = await service
+      .from('study_plan')
+      .select('tasks')
+      .eq('user_id', user.id)
+      .eq('plan_date', today)
+      .single()
+    planData = localPlan
+  }
+
   // Detect active courses missing a syllabus (no Tier 1 material)
   const courseIds = (courses ?? []).map((c: { course_id: string }) => c.course_id)
   const { data: tier1Materials } = courseIds.length > 0
-    ? await service.from('materials').select('course_id').eq('tier', 1).in('course_id', courseIds)
+    ? await service.from('materials').select('course_id').eq('user_id', user.id).eq('tier', 1).in('course_id', courseIds)
     : { data: [] as { course_id: string }[] }
 
   const coursesWithSyllabus = new Set((tier1Materials ?? []).map((m: { course_id: string }) => m.course_id))
@@ -54,7 +70,7 @@ export default async function TodayPage() {
 
   // Auto-generate today's plan if none exists
   let tasks: TaskItem[] = []
-  if (!plan) {
+  if (!planData) {
     await runScheduler(user.id)
     const { data: fresh } = await service
       .from('study_plan')
@@ -64,7 +80,7 @@ export default async function TodayPage() {
       .single()
     tasks = (fresh?.tasks as TaskItem[]) ?? []
   } else {
-    tasks = (plan.tasks as TaskItem[]) ?? []
+    tasks = (planData.tasks as TaskItem[]) ?? []
   }
 
   // Enrich homework tasks with their live completion status from the assignments table
@@ -76,6 +92,7 @@ export default async function TodayPage() {
     const { data: assignmentRows } = await service
       .from('assignments')
       .select('assignment_id, completion_status')
+      .eq('user_id', user.id)
       .in('assignment_id', hwTaskIds)
     const statusMap = new Map<string, 'pending' | 'complete' | 'late'>(
       (assignmentRows ?? []).map((a: { assignment_id: string; completion_status: 'pending' | 'complete' | 'late' }) => [a.assignment_id, a.completion_status])
@@ -117,9 +134,7 @@ export default async function TodayPage() {
 
   // Fetch next 6 days' plans for the weekly schedule section
   const upcomingDates = Array.from({ length: 6 }, (_, i) => {
-    const d = new Date()
-    d.setDate(d.getDate() + i + 1)
-    return d.toISOString().split('T')[0]
+    return addDaysToDateKey(today, i + 1)
   })
 
   const { data: upcomingPlans } = await service
@@ -141,7 +156,7 @@ export default async function TodayPage() {
 
   return (
     <TodayClient
-      greeting={greeting(userRow?.display_name ?? 'there')}
+      greeting={greeting(userRow?.display_name ?? 'there', timeZone)}
       tasks={tasks}
       upcomingSchedule={upcomingSchedule}
       pendingCount={inboxPending?.length ?? 0}

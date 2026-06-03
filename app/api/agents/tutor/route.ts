@@ -1,14 +1,16 @@
 import { createClient, createServiceClient } from '@/lib/supabase/server'
 import { getUserApiKey } from '@/lib/vault'
+import { dateKeyInTimeZone, startOfLocalDayUtc } from '@/lib/time'
 import {
   buildTutorSystemPrompt,
   getOrCreateSession,
   createSession,
-  getSessionMessages,
+  getOwnedSessionMessages,
   saveMessage,
   autoNameSession,
   type TutorMode,
 } from '@/lib/agents/tutor'
+import { requireOwnedCourse, requireOwnedSession } from '@/lib/authz'
 import { readWikiFile, writeWikiFile } from '@/lib/wiki'
 import { newCardDefaults } from '@/lib/fsrs'
 import { retrieveChunks } from '@/lib/rag'
@@ -21,11 +23,28 @@ type Attachment = {
   data: string // base64 for images, plain text for text files
 }
 
+// Image media types Anthropic's API accepts for base64 image sources.
+const SUPPORTED_IMAGE_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp'])
+
+// Server-side attachment limits (the real trust boundary — client checks are bypassable).
+const MAX_ATTACHMENTS = 5
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024 // ~5MB decoded
+const MAX_TEXT_CHARS = 50_000
+const MAX_TOTAL_BYTES = 15 * 1024 * 1024
+
 function buildUserContent(message: string, attachments: Attachment[]): Anthropic.ContentBlockParam[] {
   const content: Anthropic.ContentBlockParam[] = []
 
   for (const att of attachments) {
     if (att.type.startsWith('image/')) {
+      if (!SUPPORTED_IMAGE_TYPES.has(att.type)) {
+        // Unsupported image type: surface to the model as text instead of crashing the call.
+        content.push({
+          type: 'text',
+          text: `[Attached image "${att.name}" (${att.type}) could not be processed — only JPEG, PNG, GIF, and WebP are supported.]`,
+        })
+        continue
+      }
       const mediaType = att.type as 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp'
       content.push({
         type: 'image',
@@ -52,7 +71,10 @@ export async function GET(request: Request) {
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
-  const messages = await getSessionMessages(sessionId)
+  const session = await requireOwnedSession(user.id, sessionId)
+  if (!session) return NextResponse.json({ error: 'Not found' }, { status: 404 })
+
+  const messages = await getOwnedSessionMessages(sessionId, user.id)
   return NextResponse.json({ messages })
 }
 
@@ -96,17 +118,48 @@ export async function POST(request: Request) {
   const apiKey = await getUserApiKey(user.id)
   if (!apiKey) return NextResponse.json({ error: 'No API key configured' }, { status: 402 })
 
+  // Attachment limits — fail fast before persisting anything or calling Anthropic.
+  if (attachments.length > MAX_ATTACHMENTS) {
+    return NextResponse.json({ error: 'too_many_attachments' }, { status: 413 })
+  }
+  let totalAttachmentBytes = 0
+  for (const att of attachments) {
+    if (att.type.startsWith('image/')) {
+      if (!SUPPORTED_IMAGE_TYPES.has(att.type)) {
+        return NextResponse.json({ error: 'unsupported_media_type' }, { status: 415 })
+      }
+      // base64-decoded size is ~3/4 of the encoded string length.
+      const decoded = Math.floor((att.data?.length ?? 0) * 0.75)
+      if (decoded > MAX_IMAGE_BYTES) {
+        return NextResponse.json({ error: 'attachment_too_large' }, { status: 413 })
+      }
+      totalAttachmentBytes += decoded
+    } else {
+      if ((att.data?.length ?? 0) > MAX_TEXT_CHARS) {
+        return NextResponse.json({ error: 'attachment_too_large' }, { status: 413 })
+      }
+      totalAttachmentBytes += att.data?.length ?? 0
+    }
+  }
+  if (totalAttachmentBytes > MAX_TOTAL_BYTES) {
+    return NextResponse.json({ error: 'attachment_too_large' }, { status: 413 })
+  }
+
   // Rate limit check
   const service = createServiceClient()
+  const ownedCourse = await requireOwnedCourse(user.id, courseId)
+  if (!ownedCourse) return NextResponse.json({ error: 'Course not found' }, { status: 404 })
+
   const { data: userRow } = await service
     .from('users')
-    .select('daily_message_limit')
+    .select('daily_message_limit, timezone')
     .eq('user_id', user.id)
     .single()
 
   if (userRow?.daily_message_limit != null) {
-    const todayStart = new Date()
-    todayStart.setHours(0, 0, 0, 0)
+    // Reset the counter at the user's local midnight, not the server's (UTC on Vercel).
+    const tz = userRow.timezone ?? 'UTC'
+    const todayStart = startOfLocalDayUtc(dateKeyInTimeZone(new Date(), tz), tz)
     const { count } = await service
       .from('session_messages')
       .select('*', { count: 'exact', head: true })
@@ -115,6 +168,13 @@ export async function POST(request: Request) {
       .gte('created_at', todayStart.toISOString())
     if ((count ?? 0) >= userRow.daily_message_limit) {
       return NextResponse.json({ error: 'rate_limited' }, { status: 429 })
+    }
+  }
+
+  if (existingSessionId) {
+    const existingSession = await requireOwnedSession(user.id, existingSessionId)
+    if (!existingSession || existingSession.course_id !== courseId) {
+      return NextResponse.json({ error: 'Session not found' }, { status: 404 })
     }
   }
 
@@ -129,7 +189,7 @@ export async function POST(request: Request) {
 
   const service2 = createServiceClient()
   const [{ data: courseRow }, { data: courseTopics }] = await Promise.all([
-    service2.from('courses').select('course_type, professor_id').eq('course_id', courseId).single(),
+    service2.from('courses').select('course_type, professor_id').eq('course_id', courseId).eq('user_id', user.id).single(),
     service2.from('topics').select('topic_id, name').eq('course_id', courseId).eq('user_id', user.id).order('syllabus_order', { ascending: true }),
   ])
 
@@ -150,7 +210,7 @@ export async function POST(request: Request) {
         topics,
       })
     })(),
-    getSessionMessages(sessionId),
+    getOwnedSessionMessages(sessionId, user.id),
   ])
 
   const client = new Anthropic({ apiKey })
@@ -307,6 +367,7 @@ export async function POST(request: Request) {
 
   const readable = new ReadableStream({
     async start(controller) {
+      let closed = false
       try {
         const messages: Anthropic.MessageParam[] = [
           ...priorMessages.map((m: { role: string; content: string }) => ({
@@ -445,6 +506,7 @@ export async function POST(request: Request) {
                       .from('topics')
                       .update({ content_coverage: coverage })
                       .eq('topic_id', resolvedTopicId)
+                      .eq('user_id', user.id)
                   }
                 } catch { /* non-critical */ }
 
@@ -464,24 +526,39 @@ export async function POST(request: Request) {
               } else if (block.name === 'grade_answer') {
                 const input = block.input as { topic_name: string; score: number; rationale: string }
                 const service = createServiceClient()
+                // Clamp once so the value stored and the value shown to the student agree.
+                const score = Math.min(1, Math.max(0, Number(input.score)))
                 // Look up topic for this course, update mastery
                 const { data: topic } = await service
                   .from('topics')
                   .select('topic_id')
                   .eq('course_id', courseId)
+                  .eq('user_id', user.id)
                   .ilike('name', input.topic_name)
                   .limit(1)
-                  .single()
+                  .maybeSingle()
 
                 if (topic) {
-                  await service.from('topic_mastery').upsert({
+                  const { error: masteryError } = await service.from('topic_mastery').upsert({
                     user_id: user.id,
                     topic_id: topic.topic_id,
-                    mastery_score: input.score,
+                    mastery_score: score,
+                    last_updated: new Date().toISOString(),
                   }, { onConflict: 'user_id,topic_id' })
+                  if (masteryError) {
+                    console.error('[tutor] mastery upsert failed', masteryError)
+                  } else {
+                    // History rows only after a successful mastery write (Phase 9).
+                    const { error: historyError } = await service.from('mastery_history').insert({
+                      user_id: user.id,
+                      topic_id: topic.topic_id,
+                      mastery_score: score,
+                    })
+                    if (historyError) console.error('[tutor] mastery history insert failed', historyError)
+                  }
                 }
 
-                controller.enqueue(emit({ t: 'grade', score: input.score, rationale: input.rationale, topic: input.topic_name }))
+                controller.enqueue(emit({ t: 'grade', score, rationale: input.rationale, topic: input.topic_name }))
                 toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: 'Grade recorded.' })
               } else if (block.name === 'create_chart') {
                 const input = block.input as {
@@ -506,10 +583,16 @@ export async function POST(request: Request) {
                 toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: 'Chart rendered inline in the chat.' })
               } else if (block.name === 'write_wiki_pattern') {
                 const input = block.input as { file: string; insight: string }
-                const existing = await readWikiFile(user.id, input.file) ?? ''
+                // The model-supplied `file` is untrusted: course material / attachments
+                // can prompt-inject a call to this tool, and the schema enum is only a
+                // hint (not runtime-enforced). This tool exists solely to record student
+                // learning patterns, so hard-target learning_profile.md and ignore `file`
+                // — preventing writes to professor_*.md / index.md / log.md or any path.
+                const target = 'learning_profile.md'
+                const existing = await readWikiFile(user.id, target) ?? ''
                 const timestamp = new Date().toISOString().split('T')[0]
                 const updated = existing.trimEnd() + `\n\n- [${timestamp}] ${input.insight}`
-                await writeWikiFile(user.id, input.file, updated, 'tutor')
+                await writeWikiFile(user.id, target, updated, 'tutor')
                 toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: 'Pattern recorded.' })
               }
             }
@@ -536,17 +619,29 @@ export async function POST(request: Request) {
           controller.enqueue(emit({ t: 'error', c: `Empty response from model (${deepThink ? 'Opus 4.7' : 'Sonnet 4.6'}). Check server logs.` }))
         }
 
-        controller.close()
-        await saveMessage(sessionId, user.id, 'assistant', fullText, serverInlineCards.length > 0 ? serverInlineCards : null)
+        // Persist the assistant turn BEFORE closing the stream, and never let a
+        // persistence failure abort the stream — the error event can still reach the
+        // client while the controller is open, and the catch below won't double-close.
+        try {
+          await saveMessage(sessionId, user.id, 'assistant', fullText, serverInlineCards.length > 0 ? serverInlineCards : null)
+        } catch (saveErr) {
+          console.error('[tutor] saveMessage failed', saveErr)
+        }
 
         const isFirstExchange = priorMessages.length === 0
         if (isFirstExchange) {
           autoNameSession(sessionId, user.id, `Student: ${message}\nTutor: ${fullText}`, apiKey)
         }
+
+        controller.close()
+        closed = true
       } catch (err) {
         console.error('[tutor] stream error', err)
-        controller.enqueue(emit({ t: 'error', c: err instanceof Error ? err.message : String(err) }))
-        controller.close()
+        if (!closed) {
+          try { controller.enqueue(emit({ t: 'error', c: err instanceof Error ? err.message : String(err) })) } catch { /* controller may be unwritable */ }
+          try { controller.close() } catch { /* already closed */ }
+          closed = true
+        }
       }
     },
   })

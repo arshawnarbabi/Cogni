@@ -16,6 +16,7 @@ create table if not exists public.practice_test_results (
 
 alter table public.practice_test_results enable row level security;
 
+drop policy if exists "Users manage own practice results" on public.practice_test_results;
 create policy "Users manage own practice results"
   on public.practice_test_results
   for all

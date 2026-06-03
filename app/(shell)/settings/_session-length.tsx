@@ -15,16 +15,23 @@ export function SessionLengthPicker({ initial }: { initial: number }) {
 
   async function pick(value: number) {
     if (value === selected) return
+    const prev = selected
     setSelected(value)
     setSaving(true)
     try {
-      await fetch('/api/settings/session-length', {
+      const res = await fetch('/api/settings/session-length', {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sessionLength: value }),
       })
-      setSaved(true)
-      setTimeout(() => setSaved(false), 2000)
+      if (res.ok) {
+        setSaved(true)
+        setTimeout(() => setSaved(false), 2000)
+      } else {
+        setSelected(prev)
+      }
+    } catch {
+      setSelected(prev)
     } finally {
       setSaving(false)
     }

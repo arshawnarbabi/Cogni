@@ -1,6 +1,7 @@
 import { createClient, createServiceClient } from '@/lib/supabase/server'
 import { redirect } from 'next/navigation'
 import { ReviewClient } from './_client'
+import { dateKeyInTimeZone } from '@/lib/time'
 
 export const dynamic = 'force-dynamic'
 
@@ -14,7 +15,12 @@ export default async function ReviewPage({ searchParams }: { searchParams: Searc
   if (!user) redirect('/auth')
 
   const service = createServiceClient()
-  const today = new Date().toISOString().split('T')[0]
+  const { data: userRow } = await service
+    .from('users')
+    .select('timezone')
+    .eq('user_id', user.id)
+    .single()
+  const today = dateKeyInTimeZone(new Date(), userRow?.timezone ?? 'UTC')
 
   let query = service
     .from('flashcards')

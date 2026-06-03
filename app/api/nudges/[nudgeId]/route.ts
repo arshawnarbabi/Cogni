@@ -30,16 +30,18 @@ export async function PATCH(
   if (!nudge) return NextResponse.json({ error: 'Not found' }, { status: 404 })
 
   if (action === 'resolve') {
-    await service.from('nudges').update({
+    const { error } = await service.from('nudges').update({
       status: 'resolved',
       resolved_at: new Date().toISOString(),
-    }).eq('nudge_id', nudgeId)
+    }).eq('nudge_id', nudgeId).eq('user_id', user.id)
+    if (error) return NextResponse.json({ error: error.message }, { status: 500 })
   } else {
     const snoozedUntil = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString()
-    await service.from('nudges').update({
+    const { error } = await service.from('nudges').update({
       status: 'snoozed',
       snoozed_until: snoozedUntil,
-    }).eq('nudge_id', nudgeId)
+    }).eq('nudge_id', nudgeId).eq('user_id', user.id)
+    if (error) return NextResponse.json({ error: error.message }, { status: 500 })
   }
 
   return NextResponse.json({ ok: true })

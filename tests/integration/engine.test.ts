@@ -1,0 +1,113 @@
+// Layer 2 — behind-the-scenes engine tests against the LOCAL Supabase + seeded data.
+// Run with: SUPABASE_URL=.. SUPABASE_SERVICE_ROLE_KEY=.. npx vitest run tests/integration
+import { describe, it, expect, beforeAll } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { createClient } from '@supabase/supabase-js'
+
+const URL_ = process.env.SUPABASE_URL
+const KEY_ = process.env.SUPABASE_SERVICE_ROLE_KEY
+const seed = JSON.parse(readFileSync(fileURLToPath(new URL('../../test-harness/seed-output.json', import.meta.url)), 'utf8'))
+const db = createClient(URL_!, KEY_!, { auth: { autoRefreshToken: false, persistSession: false } })
+
+const masteryOf = async (topicId: string) => {
+  const { data } = await db.from('topic_mastery').select('mastery_score').eq('user_id', seed.userId).eq('topic_id', topicId).maybeSingle()
+  return data ? Number(data.mastery_score) : null
+}
+const historyCount = async (topicId: string) => {
+  const { count } = await db.from('mastery_history').select('*', { count: 'exact', head: true }).eq('user_id', seed.userId).eq('topic_id', topicId)
+  return count ?? 0
+}
+
+beforeAll(() => {
+  if (!URL_ || !KEY_) throw new Error('SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY required')
+})
+
+describe('review_card_atomic RPC', () => {
+  it('updates FSRS, applies clamped mastery delta, and writes history (existing row)', async () => {
+    const topic = seed.topics.kinematics
+    // pin a known starting mastery
+    await db.from('topic_mastery').update({ mastery_score: 0.5 }).eq('user_id', seed.userId).eq('topic_id', topic)
+    const before = await historyCount(topic)
+
+    const { error } = await db.rpc('review_card_atomic', {
+      p_card_id: seed.cards[0], p_user_id: seed.userId,
+      p_fsrs_stability: 12.3, p_fsrs_difficulty: 6.1, p_fsrs_reps: 99, p_fsrs_lapses: 1,
+      p_fsrs_state: 'review', p_fsrs_last_review: new Date().toISOString(),
+      p_fsrs_next_review_date: '2099-01-01', p_mastery_delta: 0.08,
+    })
+    expect(error).toBeNull()
+
+    const { data: card } = await db.from('flashcards').select('fsrs_reps, fsrs_next_review_date, fsrs_state').eq('card_id', seed.cards[0]).single()
+    expect(card!.fsrs_reps).toBe(99)
+    expect(card!.fsrs_next_review_date).toBe('2099-01-01')
+
+    expect(await masteryOf(topic)).toBeCloseTo(0.58, 5)   // 0.50 + 0.08
+    expect(await historyCount(topic)).toBe(before + 1)     // history written
+  })
+
+  it('CREATES a missing topic_mastery row instead of silently doing nothing (the fix)', async () => {
+    const topic = seed.topics.kinematics
+    await db.from('topic_mastery').delete().eq('user_id', seed.userId).eq('topic_id', topic)
+    expect(await masteryOf(topic)).toBeNull() // gone
+
+    const { error } = await db.rpc('review_card_atomic', {
+      p_card_id: seed.cards[1], p_user_id: seed.userId,
+      p_fsrs_stability: 1, p_fsrs_difficulty: 5, p_fsrs_reps: 1, p_fsrs_lapses: 0,
+      p_fsrs_state: 'learning', p_fsrs_last_review: new Date().toISOString(),
+      p_fsrs_next_review_date: '2099-02-02', p_mastery_delta: 0.08,
+    })
+    expect(error).toBeNull()
+    expect(await masteryOf(topic)).toBeCloseTo(0.08, 5) // recreated, not no-op
+  })
+
+  it('clamps mastery to a max of 1.0', async () => {
+    const topic = seed.topics.kinematics
+    await db.from('topic_mastery').update({ mastery_score: 0.95 }).eq('user_id', seed.userId).eq('topic_id', topic)
+    await db.rpc('review_card_atomic', {
+      p_card_id: seed.cards[0], p_user_id: seed.userId,
+      p_fsrs_stability: 1, p_fsrs_difficulty: 5, p_fsrs_reps: 2, p_fsrs_lapses: 0,
+      p_fsrs_state: 'review', p_fsrs_last_review: new Date().toISOString(),
+      p_fsrs_next_review_date: '2099-03-03', p_mastery_delta: 0.12,
+    })
+    expect(await masteryOf(topic)).toBe(1) // 0.95 + 0.12 clamped to 1
+  })
+
+  it('rejects a review for a card the user does not own', async () => {
+    const { error } = await db.rpc('review_card_atomic', {
+      p_card_id: seed.cards[0], p_user_id: '00000000-0000-0000-0000-000000000000',
+      p_fsrs_stability: 1, p_fsrs_difficulty: 5, p_fsrs_reps: 1, p_fsrs_lapses: 0,
+      p_fsrs_state: 'review', p_fsrs_last_review: new Date().toISOString(),
+      p_fsrs_next_review_date: '2099-01-01', p_mastery_delta: 0.08,
+    })
+    expect(error).not.toBeNull() // "card not found or not owned by user"
+  })
+})
+
+describe('Vault secret RPCs (incl. the new delete)', () => {
+  it('stores, retrieves, then permanently deletes a per-user secret', async () => {
+    const name = 'openai_key'
+    await db.rpc('store_user_secret', { p_user_id: seed.userId, p_secret_name: name, p_secret: 'sk-test-abc123' })
+    const { data: got } = await db.rpc('get_user_secret', { p_user_id: seed.userId, p_secret_name: name })
+    expect(got).toBe('sk-test-abc123')
+
+    await db.rpc('delete_user_secret', { p_user_id: seed.userId, p_secret_name: name })
+    const { data: after } = await db.rpc('get_user_secret', { p_user_id: seed.userId, p_secret_name: name })
+    expect(after).toBeNull() // truly removed, not blanked
+  })
+})
+
+describe('RAG keyword fallback (GIN full-text index + english config)', () => {
+  it('returns the seeded chunk matching a keyword query', async () => {
+    const { data, error } = await db
+      .from('material_embeddings')
+      .select('material_id, chunk_index, content')
+      .eq('user_id', seed.userId)
+      .in('material_id', [seed.materialId])
+      .textSearch('content', 'Newton', { type: 'plain', config: 'english' })
+      .limit(5)
+    expect(error).toBeNull()
+    expect(data!.length).toBeGreaterThanOrEqual(1)
+    expect(data!.some(r => /Newton/i.test(r.content))).toBe(true)
+  })
+})

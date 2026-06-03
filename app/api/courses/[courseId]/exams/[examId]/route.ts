@@ -18,14 +18,16 @@ export async function PATCH(
   }
 
   const service = createServiceClient()
-  const { error } = await service
+  const { data, error } = await service
     .from('exams')
     .update({ student_score: student_score ?? null })
     .eq('exam_id', examId)
     .eq('course_id', courseId)
     .eq('user_id', user.id)
+    .select('exam_id')
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+  if (!data || data.length === 0) return NextResponse.json({ error: 'Exam not found' }, { status: 404 })
 
   return NextResponse.json({ ok: true })
 }

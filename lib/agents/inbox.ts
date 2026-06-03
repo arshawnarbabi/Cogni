@@ -6,6 +6,7 @@ import { appendToLog } from '@/lib/wiki'
 import { runProfiler } from '@/lib/agents/profiler'
 import { runFlashcardAgent } from '@/lib/agents/flashcard'
 import { processEmbeddings } from '@/lib/rag'
+import { requireOwnedCourse } from '@/lib/authz'
 
 type ClassifyResult = {
   courseId: string | null
@@ -144,12 +145,16 @@ export async function classifyMaterial(
 ): Promise<ClassifyResult> {
   const service = createServiceClient()
 
-  await service.from('materials').update({ processing_status: 'processing' }).eq('material_id', materialId)
+  await service
+    .from('materials')
+    .update({ processing_status: 'processing' })
+    .eq('material_id', materialId)
+    .eq('user_id', userId)
 
   const apiKey = await getUserApiKey(userId)
   if (!apiKey) {
-    await service.from('materials').update({ processing_status: 'failed' }).eq('material_id', materialId)
-    await service.from('inbox_items').update({ classification_status: 'failed' }).eq('material_id', materialId)
+    await service.from('materials').update({ processing_status: 'failed' }).eq('material_id', materialId).eq('user_id', userId)
+    await service.from('inbox_items').update({ classification_status: 'failed' }).eq('material_id', materialId).eq('user_id', userId)
     return { courseId: null, tier: 4, status: 'failed', isHomework: false, dueDate: null }
   }
 
@@ -164,8 +169,8 @@ export async function classifyMaterial(
     .download(storagePath)
 
   if (downloadError || !fileData) {
-    await service.from('materials').update({ processing_status: 'failed' }).eq('material_id', materialId)
-    await service.from('inbox_items').update({ classification_status: 'failed' }).eq('material_id', materialId)
+    await service.from('materials').update({ processing_status: 'failed' }).eq('material_id', materialId).eq('user_id', userId)
+    await service.from('inbox_items').update({ classification_status: 'failed' }).eq('material_id', materialId).eq('user_id', userId)
     return { courseId: null, tier: 4, status: 'failed', isHomework: false, dueDate: null }
   }
 
@@ -178,8 +183,14 @@ export async function classifyMaterial(
 
   // If course is pre-assigned (uploaded directly to a course), skip classification
   if (forceCourseId) {
-    await service.from('materials').update({ processing_status: 'processed', course_id: forceCourseId, tier: null }).eq('material_id', materialId)
-    await service.from('inbox_items').update({ classification_status: 'classified', course_id: forceCourseId, tier: null }).eq('material_id', materialId)
+    const ownedCourse = await requireOwnedCourse(userId, forceCourseId)
+    if (!ownedCourse) {
+      await service.from('materials').update({ processing_status: 'failed' }).eq('material_id', materialId).eq('user_id', userId)
+      await service.from('inbox_items').update({ classification_status: 'failed' }).eq('material_id', materialId).eq('user_id', userId)
+      return { courseId: null, tier: 4, status: 'failed', isHomework: false, dueDate: null }
+    }
+    await service.from('materials').update({ processing_status: 'processed', course_id: forceCourseId, tier: null }).eq('material_id', materialId).eq('user_id', userId)
+    await service.from('inbox_items').update({ classification_status: 'classified', course_id: forceCourseId, tier: null }).eq('material_id', materialId).eq('user_id', userId)
     await appendToLog(userId, `Inbox: "${filename}" assigned directly to course ${forceCourseId}`)
     if (fullContent.length > 100) {
       await processEmbeddings(userId, materialId, fullContent).catch(e => console.error('[rag] processEmbeddings failed', e))
@@ -221,8 +232,8 @@ export async function classifyMaterial(
       rawResponse = visionMessage.content[0].type === 'text' ? visionMessage.content[0].text : ''
     } catch (e) {
       console.error('[inbox] vision classification failed', e)
-      await service.from('materials').update({ processing_status: 'failed' }).eq('material_id', materialId)
-      await service.from('inbox_items').update({ classification_status: 'unreadable' }).eq('material_id', materialId)
+      await service.from('materials').update({ processing_status: 'failed' }).eq('material_id', materialId).eq('user_id', userId)
+      await service.from('inbox_items').update({ classification_status: 'unreadable' }).eq('material_id', materialId).eq('user_id', userId)
       await appendToLog(userId, `Inbox: "${filename}" marked unreadable — vision failed`)
       return { courseId: null, tier: 4, status: 'unreadable', isHomework: false, dueDate: null }
     }
@@ -239,8 +250,9 @@ export async function classifyMaterial(
 
   // Auto-dismiss context hints — they're not course materials
   if (isContextHint) {
-    await service.from('inbox_items').delete().eq('material_id', materialId)
-    await service.from('materials').delete().eq('material_id', materialId)
+    await service.from('inbox_items').delete().eq('material_id', materialId).eq('user_id', userId)
+    await service.from('materials').delete().eq('material_id', materialId).eq('user_id', userId)
+    await service.storage.from('materials').remove([storagePath]).catch(() => {})
     await appendToLog(userId, `Inbox: "${filename}" auto-dismissed as context hint`)
     return { courseId: null, tier: 4, status: 'classified', isHomework: false, dueDate: null, dismissed: true }
   }
@@ -251,11 +263,13 @@ export async function classifyMaterial(
     .from('materials')
     .update({ processing_status: 'processed', course_id: courseId ?? undefined, tier })
     .eq('material_id', materialId)
+    .eq('user_id', userId)
 
   await service
     .from('inbox_items')
     .update({ classification_status: classificationStatus, course_id: courseId, tier })
     .eq('material_id', materialId)
+    .eq('user_id', userId)
 
   const courseName = (courses ?? []).find((c: { course_id: string; name: string }) => c.course_id === courseId)?.name ?? 'unknown course'
   const tierLabel = ['', 'Syllabus', 'Primary', 'Supplementary', 'Misc'][tier]

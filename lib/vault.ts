@@ -1,5 +1,7 @@
 import { createServiceClient } from '@/lib/supabase/server'
 
+const SECRET_NAME_RE = /^[a-z0-9_]+$/
+
 export async function getUserApiKey(userId: string): Promise<string | null> {
   const service = createServiceClient()
   const { data, error } = await service.rpc('get_user_api_key', { p_user_id: userId })
@@ -7,9 +9,51 @@ export async function getUserApiKey(userId: string): Promise<string | null> {
     console.error('[vault] get_user_api_key RPC error:', error)
     return null
   }
-  if (!data) {
-    console.error(`[vault] get_user_api_key returned empty for user ${userId} (secret name should be "api_key_${userId}")`)
+  // No key configured is a normal, expected state (BYOK — the UI shows a nudge),
+  // so return null quietly instead of logging an error on every key lookup.
+  if (!data) return null
+  return data as string
+}
+
+export async function getUserSecret(userId: string, secretName: string): Promise<string | null> {
+  if (!SECRET_NAME_RE.test(secretName)) return null
+  const service = createServiceClient()
+  const { data, error } = await service.rpc('get_user_secret', {
+    p_user_id: userId,
+    p_secret_name: secretName,
+  })
+  if (error) {
+    console.error('[vault] get_user_secret RPC error:', error)
     return null
   }
-  return data as string
+  return data ? data as string : null
+}
+
+export async function setUserSecret(userId: string, secretName: string, value: string): Promise<void> {
+  if (!SECRET_NAME_RE.test(secretName)) throw new Error('Invalid secret name')
+  const service = createServiceClient()
+  const { error } = await service.rpc('store_user_secret', {
+    p_user_id: userId,
+    p_secret_name: secretName,
+    p_secret: value,
+  })
+  if (error) throw new Error(error.message)
+}
+
+/** Permanently remove a named per-user secret from the Vault. Idempotent. */
+export async function deleteUserSecret(userId: string, secretName: string): Promise<void> {
+  if (!SECRET_NAME_RE.test(secretName)) return
+  const service = createServiceClient()
+  const { error } = await service.rpc('delete_user_secret', {
+    p_user_id: userId,
+    p_secret_name: secretName,
+  })
+  if (error) throw new Error(error.message)
+}
+
+/** Permanently remove the user's Anthropic API key secret from the Vault. Idempotent. */
+export async function deleteUserApiKey(userId: string): Promise<void> {
+  const service = createServiceClient()
+  const { error } = await service.rpc('delete_user_api_key', { p_user_id: userId })
+  if (error) throw new Error(error.message)
 }

@@ -13,7 +13,7 @@ import {
   Archive,
   FilePdf,
   FileText,
-  Image,
+  Image as ImageIcon,
   Keyboard,
   CaretDown,
   CaretUp,
@@ -96,7 +96,7 @@ const TIER_LABELS: Record<number, string> = {
 
 function FileIcon({ fileType }: { fileType: string | null }) {
   if (fileType === 'pdf') return <FilePdf size={14} className="text-red-400" weight="fill" />
-  if (fileType === 'image') return <Image size={14} className="text-blue-400" weight="fill" />
+  if (fileType === 'image') return <ImageIcon size={14} className="text-blue-400" weight="fill" />
   if (fileType === 'typed') return <Keyboard size={14} className="text-primary" weight="fill" />
   return <FileText size={14} className="text-muted-foreground" weight="fill" />
 }

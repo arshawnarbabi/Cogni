@@ -13,7 +13,8 @@ export async function PATCH(request: Request) {
   }
 
   const service = createServiceClient()
-  await service.from('users').update({ session_length_preference: sessionLength }).eq('user_id', user.id)
+  const { error } = await service.from('users').update({ session_length_preference: sessionLength }).eq('user_id', user.id)
+  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
 
   // Rerun scheduler so daily plan uses the updated session length
   runScheduler(user.id).catch(e =>

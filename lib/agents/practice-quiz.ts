@@ -58,20 +58,21 @@ export async function generatePracticeQuiz(
     .from('topics')
     .select('topic_id, name')
     .eq('course_id', courseId)
+    .eq('user_id', userId)
     .order('syllabus_order', { ascending: true })
     .limit(20)
 
   const masteryMap = new Map<string, number>()
   for (const m of mastery ?? []) {
     const t = m.topics as { topic_id: string; name: string } | null
-    if (t) masteryMap.set(t.name, Number(m.mastery_score ?? 0))
+    if (t) masteryMap.set(t.topic_id, Number(m.mastery_score ?? 0))
   }
 
   const topicList = (allTopics ?? [])
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     .filter((t: any) => !topicFilter || t.name.toLowerCase().includes(topicFilter.toLowerCase()))
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    .map((t: any) => `- ${t.name} (mastery: ${Math.round((masteryMap.get(t.name) ?? 0) * 100)}%)`)
+    .map((t: any) => `- ${t.name} (mastery: ${Math.round((masteryMap.get(t.topic_id) ?? 0) * 100)}%)`)
     .join('\n')
 
   const formatInstruction =
@@ -119,7 +120,19 @@ Schema for each question:
 
   const raw = response.content[0].type === 'text' ? response.content[0].text.trim() : '[]'
   const stripped = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')
-  return JSON.parse(stripped) as QuizQuestion[]
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(stripped)
+  } catch {
+    throw new Error('Quiz generation returned invalid JSON')
+  }
+  const arr = Array.isArray(parsed)
+    ? parsed
+    : (parsed && Array.isArray((parsed as { questions?: unknown }).questions)
+        ? (parsed as { questions: unknown[] }).questions
+        : [])
+  if (arr.length === 0) throw new Error('Quiz generation returned no questions')
+  return arr.slice(0, questionCount) as QuizQuestion[]
 }
 
 // ── Generate simulated exam questions (Sonnet) ────────────────────────────────
@@ -134,24 +147,26 @@ export async function generateSimulatedExam(
 
   const service = createServiceClient()
 
-  // Get exam info for timing + past exam question counts
-  const { data: exams } = await service
+  // Get exam info for timing — nearest upcoming exam (the one being prepared for)
+  const today = new Date().toISOString().split('T')[0]
+  const { data: upcomingExams } = await service
     .from('exams')
-    .select('date, duration_minutes, question_count, grade_weight')
+    .select('date, duration_minutes')
     .eq('course_id', courseId)
-    .order('date', { ascending: false })
-    .limit(3)
+    .eq('user_id', userId)
+    .gte('date', today)
+    .order('date', { ascending: true })
+    .limit(1)
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const upcomingExam = (exams ?? []).find((e: any) => new Date(e.date) >= new Date())
-  const durationMinutes = upcomingExam?.duration_minutes ?? 60
-  const questionCount = upcomingExam?.question_count ?? 20
+  const durationMinutes = upcomingExams?.[0]?.duration_minutes ?? 60
+  const questionCount = 20
 
   // Get professor wiki
   const { data: courseRow } = await service
     .from('courses')
     .select('professor_id')
     .eq('course_id', courseId)
+    .eq('user_id', userId)
     .single()
 
   let professorWiki = ''
@@ -164,6 +179,7 @@ export async function generateSimulatedExam(
     .from('topics')
     .select('name, professor_weight, content_coverage')
     .eq('course_id', courseId)
+    .eq('user_id', userId)
     .order('professor_weight', { ascending: false })
     .limit(20)
 
@@ -210,9 +226,11 @@ Schema for each question:
 
   const raw = response.content[0].type === 'text' ? response.content[0].text.trim() : '[]'
   const stripped = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')
-  const questions = JSON.parse(stripped) as QuizQuestion[]
+  const parsed = JSON.parse(stripped)
+  const questions = (Array.isArray(parsed) ? parsed : []) as QuizQuestion[]
+  if (questions.length === 0) throw new Error('Simulated exam generation returned no questions')
 
-  return { questions, durationMinutes }
+  return { questions: questions.slice(0, questionCount), durationMinutes }
 }
 
 // ── Grade results + update mastery + write to DB ──────────────────────────────
@@ -301,6 +319,7 @@ Return JSON only: {"score": 0.0-1.0, "correct": true/false, "feedback": "one sen
     .from('topics')
     .select('topic_id, name')
     .eq('course_id', courseId)
+    .eq('user_id', userId)
 
   const topicByName = new Map<string, string>()
   for (const t of (courseTopics ?? []) as { topic_id: string; name: string }[]) {
@@ -310,9 +329,15 @@ Return JSON only: {"score": 0.0-1.0, "correct": true/false, "feedback": "one sen
   const resolvedTopics: { topicName: string; topic_id: string; newScore: number }[] = []
   for (const [topicName, scores] of topicScores) {
     const needle = topicName.toLowerCase()
-    let topic_id: string | undefined
-    for (const [name, id] of topicByName) {
-      if (name.includes(needle) || needle.includes(name)) { topic_id = id; break }
+    let topic_id = topicByName.get(needle)   // exact match wins
+    if (!topic_id) {
+      // fallback: pick the longest matching candidate deterministically
+      let bestName = ''
+      for (const [name, id] of topicByName) {
+        if (name.includes(needle) || needle.includes(name)) {
+          if (name.length > bestName.length) { bestName = name; topic_id = id }
+        }
+      }
     }
     if (!topic_id) continue
     resolvedTopics.push({ topicName, topic_id, newScore: scores.correct / scores.total })
@@ -331,7 +356,8 @@ Return JSON only: {"score": 0.0-1.0, "correct": true/false, "feedback": "one sen
       existingByTopic.set(row.topic_id, Number(row.mastery_score ?? 0))
     }
 
-    const masteryUpserts: { user_id: string; topic_id: string; mastery_score: number }[] = []
+    const nowIso = new Date().toISOString()
+    const masteryUpserts: { user_id: string; topic_id: string; mastery_score: number; last_updated: string }[] = []
     const historyInserts: { user_id: string; topic_id: string; mastery_score: number }[] = []
 
     for (const r of resolvedTopics) {
@@ -340,19 +366,24 @@ Return JSON only: {"score": 0.0-1.0, "correct": true/false, "feedback": "one sen
       const blended = hadExisting ? oldScore * (1 - masteryWeight) + r.newScore * masteryWeight : r.newScore
       const finalScore = Math.min(1, Math.max(0, blended))
 
-      masteryUpserts.push({ user_id: userId, topic_id: r.topic_id, mastery_score: finalScore })
+      masteryUpserts.push({ user_id: userId, topic_id: r.topic_id, mastery_score: finalScore, last_updated: nowIso })
       historyInserts.push({ user_id: userId, topic_id: r.topic_id, mastery_score: finalScore })
-      masteryUpdates.push({ topic_id: r.topic_id, topicName: r.topicName, oldScore, newScore: blended })
+      masteryUpdates.push({ topic_id: r.topic_id, topicName: r.topicName, oldScore, newScore: finalScore })
     }
 
     if (masteryUpserts.length > 0) {
-      await service.from('topic_mastery').upsert(masteryUpserts, { onConflict: 'user_id,topic_id' })
-      await service.from('mastery_history').insert(historyInserts)
+      const { error: masteryError } = await service
+        .from('topic_mastery')
+        .upsert(masteryUpserts, { onConflict: 'user_id,topic_id' })
+      if (masteryError) console.error('[practice-quiz] mastery upsert failed', masteryError)
+
+      const { error: historyError } = await service.from('mastery_history').insert(historyInserts)
+      if (historyError) console.error('[practice-quiz] mastery history insert failed', historyError)
     }
   }
 
   // Write result record
-  await service.from('practice_test_results').insert({
+  const { error: resultError } = await service.from('practice_test_results').insert({
     user_id: userId,
     course_id: courseId,
     test_type: testType,
@@ -364,6 +395,7 @@ Return JSON only: {"score": 0.0-1.0, "correct": true/false, "feedback": "one sen
     mastery_updates: masteryUpdates,
     duration_seconds: durationSeconds ?? null,
   })
+  if (resultError) console.error('[practice-quiz] result insert failed', resultError)
 
   return { correctCount, scorePct, missedTopics, masteryUpdates, results }
 }

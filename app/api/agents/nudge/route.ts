@@ -1,12 +1,12 @@
 import { createServiceClient } from '@/lib/supabase/server'
 import { runNudgeChecks } from '@/lib/agents/nudge'
+import { isValidCronRequest } from '@/lib/cron'
 import { NextResponse } from 'next/server'
 
 // Vercel Cron Job handler — called daily at 06:00 UTC via vercel.json.
 // Vercel cron issues a GET with an Authorization header carrying CRON_SECRET.
 export async function GET(request: Request) {
-  const authHeader = request.headers.get('authorization')
-  if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
+  if (!isValidCronRequest(request)) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 

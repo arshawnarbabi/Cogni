@@ -6,13 +6,16 @@
   <img src="https://img.shields.io/badge/TypeScript-5-3178C6" alt="TypeScript" />
   <img src="https://img.shields.io/badge/Supabase-PostgreSQL-3ECF8E" alt="Supabase" />
   <img src="https://img.shields.io/badge/Claude-Sonnet%204.6-CC785C" alt="Claude" />
+  <img src="https://img.shields.io/badge/status-beta-F59E0B" alt="Beta" />
   <a href="https://trycogni.arshawnarbabi.com/"><img src="https://img.shields.io/badge/website-trycogni.arshawnarbabi.com-1D4ED8" alt="Website" /></a>
-  <a href="https://vercel.com/new/clone?repository-url=https://github.com/s24b/Cogni"><img src="https://vercel.com/button" alt="Deploy with Vercel" /></a>
+  <a href="https://vercel.com/new/clone?repository-url=https://github.com/arshawnarbabi/Cogni"><img src="https://vercel.com/button" alt="Deploy with Vercel" /></a>
 </p>
 
 <br />
 
 Cogni decides what to study, when to study, and how — so you just show up. Feed it your syllabi, lecture notes, past exams, and course materials. It classifies and processes everything automatically, extracts your topics, maps your professor's grading weights, and generates a prioritized study plan every morning based on your current mastery and upcoming exams. The tutor pulls from your actual course materials. Flashcards are scheduled by FSRS at the card and topic level. Study blocks land in your Google Calendar. All you do is study. BYOK, self-hosted on Vercel + Supabase.
+
+> **Beta:** Cogni is under active development. Expect rough edges, verify important study data, and test thoroughly before relying on it for critical coursework.
 
 <br />
 
@@ -90,8 +93,8 @@ You don't decide what to study. Cogni does.
 ## 🧠 Features
 
 - **FSRS spaced repetition** — full card-level state (stability, difficulty, reps, lapses). 4-point ratings: Again / Hard / Good / Easy. Atomic RPC updates FSRS state and topic mastery in one transaction.
-- **AI study planner** — daily plan prioritized by mastery deficit × professor weight × exam proximity. Generates a 6-day ahead preview. Writes flashcard review blocks to Google Calendar.
-- **Claude-powered tutor** — four modes: Answer (direct), Teach (Socratic), Focus (weak-area routing), Essay (split-view editor with tracked changes). Deep thinking mode switches to Claude Opus 4.7 with extended thinking for hard problems. Native web search. Inline flashcard and quiz generation. Session persistence with auto-naming.
+- **AI study planner** — daily plan prioritized by mastery deficit × professor weight × exam proximity. Generates a 6-day ahead preview. Writes flashcard review blocks to Google Calendar. Plans, streaks, due cards, and calendar blocks all use your local timezone (auto-detected at onboarding).
+- **Claude-powered tutor** — four modes: Answer (direct), Teach (Socratic), Focus (weak-area routing), Essay (split-view editor with tracked changes). Deep thinking mode switches to Claude Opus 4.7 with extended thinking for hard problems. Native web search. Inline flashcard, quiz, chart, and Mermaid-diagram generation. Session persistence with auto-naming.
 - **Professor profiling** — builds a per-professor wiki from past exams, syllabi, and graded materials. Tracks question depth, phrasing style, and topic weights. Persists across semesters — add a new course with the same professor and their profile is already there.
 - **Syllabus profiler** — upload a PDF, Claude extracts topics with professor weights, exam dates, and grade breakdowns. RAG-enriched before extraction.
 - **RAG over course materials** — pgvector with OpenAI text-embedding-3-small (1536 dims). Keyword search fallback if no OpenAI key. Top-5 chunks injected into every tutor context.
@@ -118,7 +121,7 @@ Exam proximity multipliers: >30 days = 1×, >14 = 1.5×, >7 = 2×, >3 = 3×, ≤
 
 **Karpathy wiki pattern.** The tutor has a `write_wiki_pattern` tool that writes markdown to per-user files in Supabase Storage. The profiler writes `professor_*.md` on every syllabus upload. All wiki files are loaded verbatim into tutor session context on every request — no vector retrieval, just direct inject.
 
-**Streaming tutor with native web search.** Anthropic Messages API with streaming. Tools: `create_flashcards`, `create_quiz`, `open_essay_mode`, `grade_answer`, `suggest_edit`, `write_wiki_pattern`. Real-time web lookup via Anthropic's native `web_search_20250305` tool.
+**Streaming tutor with native web search.** Anthropic Messages API with streaming. Tools: `create_flashcards`, `create_quiz`, `create_chart`, `open_essay_mode`, `grade_answer`, `suggest_edit`, `write_wiki_pattern`. Real-time web lookup via Anthropic's native `web_search_20250305` tool. Markdown answers render LaTeX (KaTeX) and Mermaid diagrams.
 
 **RAG pipeline.** OpenAI `text-embedding-3-small` (1536 dims) stored in pgvector with an IVFFlat index. Chunks: 3200 chars, 400-char overlap, split on paragraph/sentence boundaries. Retrieval: top-5 chunks per query, course-scoped. Falls back to LIKE keyword search if no OpenAI key is present.
 
@@ -142,6 +145,7 @@ Exam proximity multipliers: >30 days = 1×, >14 = 1.5×, >7 = 2×, >3 = 3×, ≤
 | Charts | Recharts |
 | Rich text | TipTap |
 | Math rendering | KaTeX |
+| Diagrams | Mermaid |
 | Icons | Phosphor Icons |
 | File export | @react-pdf/renderer, docx |
 
@@ -153,13 +157,16 @@ Exam proximity multipliers: >30 days = 1×, >14 = 1.5×, >7 = 2×, >3 = 3×, ≤
 
 **Step 1 — Fork and deploy**
 
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/s24b/Cogni)
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/arshawnarbabi/Cogni)
 
 Fork the repo and deploy to Vercel, or run locally with `npm run dev`.
 
 **Step 2 — Supabase project**
 
-Create a new Supabase project. Run the SQL files in order using the Supabase SQL editor. See [`supabase/README.md`](supabase/README.md) for the exact file order — do not skip files or run them out of order.
+Create a new Supabase project, then **enable the Vault extension** (Dashboard → Database → Extensions → `supabase_vault`) — it stores your API keys and calendar tokens. Then set up the database:
+
+- **Quick:** paste [`supabase/setup.sql`](supabase/setup.sql) into the SQL editor and run it once. It bundles every migration in the correct order and is idempotent, so it's safe to re-run later to pick up schema changes.
+- **Manual:** run the individual files in the order in [`supabase/README.md`](supabase/README.md).
 
 **Step 3 — Environment variables**
 
@@ -170,13 +177,14 @@ Add these to your Vercel project settings (or `.env.local` for local dev):
 | `NEXT_PUBLIC_SUPABASE_URL` | ✅ | Supabase project URL |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | ✅ | Supabase anon key |
 | `SUPABASE_SERVICE_ROLE_KEY` | ✅ | Supabase service role key |
+| `CRON_SECRET` | ✅ | Long random secret used by Vercel cron endpoints |
 | `NEXT_PUBLIC_APP_URL` | ✅ | Your deployment URL (e.g. `https://your-app.vercel.app`) |
 | `GOOGLE_CALENDAR_CLIENT_ID` | Optional | Google Cloud Console — Calendar OAuth |
 | `GOOGLE_CALENDAR_CLIENT_SECRET` | Optional | Google Cloud Console — Calendar OAuth |
 
 Anthropic and OpenAI keys are **not** env vars. Users add them in Settings after deploying.
 
-> **`CRON_SECRET`** is auto-generated by Vercel for projects with cron jobs — you do not set this manually. It secures the daily scheduler (5am UTC) and nudge check (6am UTC) endpoints so only Vercel's cron service can invoke them.
+> Set `CRON_SECRET` yourself in Vercel and keep it long and random. It secures the daily scheduler (5am UTC) and nudge check (6am UTC) endpoints so only callers with the bearer token can invoke them.
 
 **Step 4 — Google OAuth (sign-in)**
 
@@ -224,7 +232,7 @@ Both keys are stored in Supabase Vault (encrypted at rest). They are never writt
 ## 💻 Local Development
 
 ```bash
-git clone https://github.com/s24b/Cogni
+git clone https://github.com/arshawnarbabi/Cogni
 cd Cogni
 npm install
 cp .env.example .env.local
@@ -232,7 +240,19 @@ cp .env.example .env.local
 npm run dev
 ```
 
-Vercel Cron Jobs do not run locally (scheduler fires at 5am UTC, nudge at 6am UTC in production). The scheduler runs automatically when you navigate to Today if no plan exists for today. Nudge checks and other cron-triggered agents can be triggered manually via Settings → Dev Tools.
+Vercel Cron Jobs do not run locally (scheduler fires at 5am UTC, nudge at 6am UTC in production). The scheduler runs automatically when you navigate to Today if no plan exists for today. In local development (`NODE_ENV=development`), a Dev Tools section in Settings exposes a reset-account helper.
+
+<br />
+
+## 🧪 Testing
+
+```bash
+npm test                 # unit tests — timezone/FSRS logic (no setup needed)
+npm run test:integration # engine tests vs a local Supabase (review RPC, Vault, RAG)
+npm run test:e2e         # Playwright end-to-end vs the running app
+```
+
+Unit tests run anywhere. The integration and end-to-end suites run against a **local** Supabase stack (`supabase start`) so your real project is never touched — see [`test-harness/README.md`](test-harness/README.md) for the seed/apply scripts and setup.
 
 <br />
 

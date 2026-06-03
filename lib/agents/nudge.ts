@@ -1,4 +1,5 @@
 import { createServiceClient } from '@/lib/supabase/server'
+import { addDaysToDateKey, dateKeyInTimeZone } from '@/lib/time'
 
 export type ActiveNudge = {
   nudge_id: string
@@ -18,8 +19,13 @@ function daysUntil(dateStr: string): number {
 
 export async function runNudgeChecks(userId: string): Promise<void> {
   const service = createServiceClient()
-  const today = new Date().toISOString().split('T')[0]
-  const in21Days = new Date(Date.now() + 21 * 86400000).toISOString().split('T')[0]
+  const { data: userRow } = await service
+    .from('users')
+    .select('timezone')
+    .eq('user_id', userId)
+    .single()
+  const today = dateKeyInTimeZone(new Date(), userRow?.timezone ?? 'UTC')
+  const in21Days = addDaysToDateKey(today, 21)
 
   const { data: courses } = await service
     .from('courses')
@@ -129,6 +135,7 @@ export async function runNudgeChecks(userId: string): Promise<void> {
     await service.from('nudges')
       .update({ status: 'resolved', resolved_at: new Date().toISOString() })
       .in('nudge_id', toResolve)
+      .eq('user_id', userId)
   }
 
   // Upsert active nudges
@@ -146,15 +153,16 @@ export async function runNudgeChecks(userId: string): Promise<void> {
         status: 'pending',
       })
     } else if (existing.status === 'pending') {
-      await service.from('nudges').update({ content: spec.content }).eq('nudge_id', existing.nudge_id)
+      await service.from('nudges').update({ content: spec.content }).eq('nudge_id', existing.nudge_id).eq('user_id', userId)
     } else if (existing.status === 'snoozed') {
       const snoozedUntil = existing.snoozed_until ? new Date(existing.snoozed_until).getTime() : 0
       if (snoozedUntil <= Date.now()) {
         await service.from('nudges')
           .update({ status: 'pending', content: spec.content, snoozed_until: null })
           .eq('nudge_id', existing.nudge_id)
+          .eq('user_id', userId)
       } else {
-        await service.from('nudges').update({ content: spec.content }).eq('nudge_id', existing.nudge_id)
+        await service.from('nudges').update({ content: spec.content }).eq('nudge_id', existing.nudge_id).eq('user_id', userId)
       }
     }
   }

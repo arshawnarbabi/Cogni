@@ -15,6 +15,7 @@ create table if not exists public.course_web_suggestions (
 
 alter table public.course_web_suggestions enable row level security;
 
+drop policy if exists "Users manage their own web suggestions" on public.course_web_suggestions;
 create policy "Users manage their own web suggestions"
   on public.course_web_suggestions
   for all

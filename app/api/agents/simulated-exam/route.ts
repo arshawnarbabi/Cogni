@@ -1,5 +1,6 @@
 import { createClient } from '@/lib/supabase/server'
 import { generateSimulatedExam } from '@/lib/agents/practice-quiz'
+import { requireOwnedCourse } from '@/lib/authz'
 import { NextResponse } from 'next/server'
 
 const MOCK_EXAM = {
@@ -55,8 +56,10 @@ export async function POST(request: Request) {
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+  const ownedCourse = await requireOwnedCourse(user.id, courseId)
+  if (!ownedCourse) return NextResponse.json({ error: 'Course not found' }, { status: 404 })
 
-  if (process.env.NEXT_PUBLIC_MOCK_AGENTS === 'true') {
+  if (process.env.MOCK_AGENTS === 'true' && process.env.NODE_ENV !== 'production') {
     return NextResponse.json(MOCK_EXAM)
   }
 
@@ -67,6 +70,7 @@ export async function POST(request: Request) {
     .from('topics')
     .select('content_coverage')
     .eq('course_id', courseId)
+    .eq('user_id', user.id)
     .gt('content_coverage', 0.05)
     .limit(1)
 

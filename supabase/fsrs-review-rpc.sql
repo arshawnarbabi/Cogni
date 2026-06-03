@@ -51,9 +51,15 @@ begin
   end if;
 
   if v_topic_id is not null then
-    update public.topic_mastery
-    set mastery_score = greatest(0, least(1, coalesce(mastery_score, 0) + p_mastery_delta)),
-        last_updated = now()
+    insert into public.topic_mastery (user_id, topic_id, mastery_score, confidence, last_updated)
+    values (p_user_id, v_topic_id, greatest(0, least(1, p_mastery_delta)), 0, now())
+    on conflict (user_id, topic_id) do update
+      set mastery_score = greatest(0, least(1, coalesce(public.topic_mastery.mastery_score, 0) + p_mastery_delta)),
+          last_updated = now();
+
+    insert into public.mastery_history (user_id, topic_id, mastery_score)
+    select user_id, topic_id, mastery_score
+    from public.topic_mastery
     where user_id = p_user_id
       and topic_id = v_topic_id;
   end if;

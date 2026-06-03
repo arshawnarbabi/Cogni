@@ -1,5 +1,6 @@
 import { createServiceClient } from '@/lib/supabase/server'
 import { writeStudyBlocksToCalendar } from '@/lib/calendar'
+import { addDaysToDateKey, dateKeyInTimeZone } from '@/lib/time'
 
 export type TaskItem =
   | {
@@ -77,15 +78,16 @@ function buildInsight(params: {
 
 export async function runScheduler(userId: string): Promise<void> {
   const service = createServiceClient()
-  const today = new Date().toISOString().split('T')[0]
 
   const { data: userRow } = await service
     .from('users')
-    .select('session_length_preference')
+    .select('session_length_preference, timezone')
     .eq('user_id', userId)
     .single()
 
   const sessionMinutes = userRow?.session_length_preference ?? 45
+  const timeZone = userRow?.timezone ?? 'UTC'
+  const today = dateKeyInTimeZone(new Date(), timeZone)
 
   const { data: courses } = await service
     .from('courses')
@@ -130,6 +132,7 @@ export async function runScheduler(userId: string): Promise<void> {
     service
       .from('topics')
       .select('course_id, topic_id, name, professor_weight')
+      .eq('user_id', userId)
       .in('course_id', courseIds),
     service
       .from('flashcards')
@@ -211,14 +214,18 @@ export async function runScheduler(userId: string): Promise<void> {
 
   const tasks: TaskItem[] = []
 
-  // Flashcard review blocks (only if courses have extracted topics)
-  if (scored.length > 0) {
-    const totalPriority = scored.reduce((sum, c) => sum + c.priority, 0)
-    scored
+  // Flashcard review blocks — only emit for courses that actually have due cards.
+  // A zero-card course (e.g. high professor_weight + low mastery) would otherwise
+  // surface a misleading "Flashcard review / No cards yet" task and dilute the
+  // session-minute allocation owed to genuinely reviewable courses.
+  const reviewable = scored.filter(c => c.card_count > 0)
+  if (reviewable.length > 0) {
+    const totalPriority = reviewable.reduce((sum, c) => sum + c.priority, 0)
+    reviewable
       .sort((a, b) => b.priority - a.priority)
       .forEach((course, i) => {
-        const share = totalPriority > 0 ? course.priority / totalPriority : 1 / scored.length
-        const cappedShare = Math.min(0.7, Math.max(share, scored.length === 1 ? 1 : 0.1))
+        const share = totalPriority > 0 ? course.priority / totalPriority : 1 / reviewable.length
+        const cappedShare = Math.min(0.7, Math.max(share, reviewable.length === 1 ? 1 : 0.1))
         const duration = Math.round(sessionMinutes * cappedShare)
         if (duration < 5) return
         tasks.push({
@@ -312,9 +319,7 @@ export async function runScheduler(userId: string): Promise<void> {
     })
 
   // Homework blocks — due today or overdue, not yet completed
-  const tomorrow = new Date(today)
-  tomorrow.setDate(tomorrow.getDate() + 1)
-  const tomorrowStr = tomorrow.toISOString().split('T')[0]
+  const tomorrowStr = addDaysToDateKey(today, 1)
 
   const { data: assignments } = await service
     .from('assignments')
@@ -385,6 +390,14 @@ export async function runScheduler(userId: string): Promise<void> {
 export async function generateUpcomingPreview(userId: string): Promise<void> {
   const service = createServiceClient()
 
+  const { data: userRow } = await service
+    .from('users')
+    .select('timezone')
+    .eq('user_id', userId)
+    .single()
+  const timeZone = userRow?.timezone ?? 'UTC'
+  const today = dateKeyInTimeZone(new Date(), timeZone)
+
   const { data: courses } = await service
     .from('courses')
     .select('course_id, name')
@@ -403,16 +416,10 @@ export async function generateUpcomingPreview(userId: string): Promise<void> {
   // Build the 6-day window upfront.
   const dateStrs: string[] = []
   for (let dayOffset = 1; dayOffset <= 6; dayOffset++) {
-    const d = new Date()
-    d.setDate(d.getDate() + dayOffset)
-    dateStrs.push(d.toISOString().split('T')[0])
+    dateStrs.push(addDaysToDateKey(today, dayOffset))
   }
   const windowStart = dateStrs[0]
-  const windowEndExclusive = (() => {
-    const d = new Date()
-    d.setDate(d.getDate() + 7)
-    return d.toISOString().split('T')[0]
-  })()
+  const windowEndExclusive = addDaysToDateKey(today, 7)
 
   // Batch: existing plans + all due cards in window + all pending homework in window.
   const [existingPlansResult, dueCardsResult, assignmentsResult] = await Promise.all([
@@ -452,9 +459,14 @@ export async function generateUpcomingPreview(userId: string): Promise<void> {
 
   const assignmentsByDate = new Map<string, { assignment_id: string; name: string; due_date: string; course_id: string }[]>()
   for (const a of (assignmentsResult.data ?? []) as { assignment_id: string; name: string; due_date: string; course_id: string }[]) {
-    const arr = assignmentsByDate.get(a.due_date) ?? []
-    arr.push(a)
-    assignmentsByDate.set(a.due_date, arr)
+    // due_date is a date-only value stored as UTC-midnight timestamptz (the picker
+    // and inbox agent both write a bare YYYY-MM-DD). Group by its date portion so it
+    // aligns with dateStrs (and with how due cards are binned by raw fsrs_next_review_date).
+    // Re-zoning with dateKeyInTimeZone would shift the day for non-UTC users.
+    const dueKey = a.due_date.split('T')[0]
+    const arr = assignmentsByDate.get(dueKey) ?? []
+    arr.push(a) // keep original a.due_date for display
+    assignmentsByDate.set(dueKey, arr)
   }
 
   const rowsToInsert: { user_id: string; plan_date: string; tasks: TaskItem[]; generated_at: string }[] = []
