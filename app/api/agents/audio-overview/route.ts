@@ -1,6 +1,7 @@
 import { createClient, createServiceClient } from '@/lib/supabase/server'
 import { getUserApiKey } from '@/lib/vault'
 import { getUserKey } from '@/lib/user-keys'
+import { aiRouteGuard } from '@/lib/rate-limit'
 import Anthropic from '@anthropic-ai/sdk'
 import { NextResponse } from 'next/server'
 
@@ -55,6 +56,9 @@ export async function POST(request: Request) {
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
+  const guard = await aiRouteGuard(user.id, 'audio_overview')
+  if (guard) return NextResponse.json({ error: guard.error }, { status: guard.status })
 
   const openaiKey = await getUserKey(user.id, 'openai_key')
   if (!openaiKey) {
@@ -196,6 +200,23 @@ ${combinedText.slice(0, 20000)}`,
   if (uploadError) {
     console.error('[audio-overview] upload failed', uploadError)
     return NextResponse.json({ error: 'Failed to store audio' }, { status: 500 })
+  }
+
+  // Retention: keep only the latest AUDIO_KEEP_PER_COURSE overviews per course so
+  // generated MP3s don't accumulate unbounded (the biggest free-tier storage sink).
+  const AUDIO_KEEP_PER_COURSE = 3
+  try {
+    const { data: existing } = await service.storage.from('audio').list(user.id, { limit: 100 })
+    const mine = (existing ?? [])
+      .filter((f: { name: string }) => f.name.startsWith(`${courseId}_`))
+      .map((f: { name: string }) => ({ name: f.name, ts: Number(f.name.match(/_(\d+)\.mp3$/)?.[1] ?? 0) }))
+      .sort((a: { ts: number }, b: { ts: number }) => b.ts - a.ts)
+    const stale = mine.slice(AUDIO_KEEP_PER_COURSE)
+    if (stale.length > 0) {
+      await service.storage.from('audio').remove(stale.map((s: { name: string }) => `${user.id}/${s.name}`))
+    }
+  } catch (e) {
+    console.error('[audio-overview] retention prune failed', e)
   }
 
   const { data: signedUrlData } = await service.storage.from('audio').createSignedUrl(filePath, 3600)

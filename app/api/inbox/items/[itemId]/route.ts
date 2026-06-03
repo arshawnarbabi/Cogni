@@ -1,5 +1,6 @@
 import { createClient, createServiceClient } from '@/lib/supabase/server'
 import { requireOwnedCourse } from '@/lib/authz'
+import { serverError } from '@/lib/api-error'
 import { NextResponse } from 'next/server'
 
 type Params = { params: Promise<{ itemId: string }> }
@@ -30,7 +31,7 @@ export async function DELETE(_req: Request, { params }: Params) {
     .delete()
     .eq('inbox_item_id', itemId)
     .eq('user_id', user.id)
-  if (inboxDeleteError) return NextResponse.json({ error: inboxDeleteError.message }, { status: 500 })
+  if (inboxDeleteError) return serverError('inbox/dismiss', inboxDeleteError)
   if (item.material_id) {
     // Capture the storage path before deleting the row so we can clean up the object too.
     const { data: material } = await service
@@ -41,7 +42,7 @@ export async function DELETE(_req: Request, { params }: Params) {
       .single()
 
     const { error: materialDeleteError } = await service.from('materials').delete().eq('material_id', item.material_id).eq('user_id', user.id)
-    if (materialDeleteError) return NextResponse.json({ error: materialDeleteError.message }, { status: 500 })
+    if (materialDeleteError) return serverError('inbox/dismiss', materialDeleteError)
 
     // Remove the orphaned storage object (best-effort — the DB rows are already gone).
     if (material?.storage_path) {
@@ -82,7 +83,7 @@ export async function PATCH(request: Request, { params }: Params) {
     classification_status: 'classified',
     course_id: courseId,
   }).eq('inbox_item_id', itemId).eq('user_id', user.id)
-  if (inboxError) return NextResponse.json({ error: inboxError.message }, { status: 500 })
+  if (inboxError) return serverError('inbox/assign', inboxError)
 
   // Update material if it exists
   if (item.material_id) {
@@ -90,7 +91,7 @@ export async function PATCH(request: Request, { params }: Params) {
       course_id: courseId,
       processing_status: 'processed',
     }).eq('material_id', item.material_id).eq('user_id', user.id)
-    if (materialError) return NextResponse.json({ error: materialError.message }, { status: 500 })
+    if (materialError) return serverError('inbox/assign', materialError)
   }
 
   return NextResponse.json({ ok: true })

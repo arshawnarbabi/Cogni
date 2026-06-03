@@ -1,6 +1,7 @@
 import { createClient, createServiceClient } from '@/lib/supabase/server'
 import { dateKeyInTimeZone } from '@/lib/time'
 import { NextResponse } from 'next/server'
+import { serverError } from '@/lib/api-error'
 
 export async function POST(
   request: Request,
@@ -74,7 +75,7 @@ export async function POST(
     .update({ active_status: 'archived' })
     .eq('course_id', courseId)
     .eq('user_id', user.id)
-  if (archiveError) return NextResponse.json({ error: archiveError.message }, { status: 500 })
+  if (archiveError) return serverError('courses/archive', archiveError)
 
   return NextResponse.json({ ok: true })
 }
@@ -129,7 +130,7 @@ export async function DELETE(
     .update({ active_status: 'active' })
     .eq('course_id', courseId)
     .eq('user_id', user.id)
-  if (activateError) return NextResponse.json({ error: activateError.message }, { status: 500 })
+  if (activateError) return serverError('courses/unarchive', activateError)
 
   return NextResponse.json({ ok: true })
 }

@@ -1,4 +1,5 @@
 import { createClient, createServiceClient } from '@/lib/supabase/server'
+import { serverError } from '@/lib/api-error'
 import { NextResponse } from 'next/server'
 
 export async function GET(
@@ -20,6 +21,6 @@ export async function GET(
     .in('processing_status', ['processed'])
     .order('tier', { ascending: true })
 
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+  if (error) return serverError('courses/materials:list', error)
   return NextResponse.json({ materials: materials ?? [] })
 }

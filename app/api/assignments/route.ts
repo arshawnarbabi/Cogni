@@ -1,4 +1,5 @@
 import { createClient, createServiceClient } from '@/lib/supabase/server'
+import { serverError } from '@/lib/api-error'
 import { NextResponse } from 'next/server'
 
 export async function POST(request: Request) {
@@ -37,7 +38,7 @@ export async function POST(request: Request) {
     .select('assignment_id')
     .single()
 
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+  if (error) return serverError('assignments:POST', error)
 
   return NextResponse.json({ ok: true, assignment_id: data.assignment_id })
 }
@@ -57,6 +58,6 @@ export async function PATCH(request: Request) {
     .eq('assignment_id', assignment_id)
     .eq('user_id', user.id)
 
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+  if (error) return serverError('assignments:PATCH', error)
   return NextResponse.json({ ok: true })
 }

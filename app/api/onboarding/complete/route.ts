@@ -2,7 +2,9 @@ import { createClient, createServiceClient } from '@/lib/supabase/server'
 import { initWiki } from '@/lib/wiki'
 import { runProfiler } from '@/lib/agents/profiler'
 import { requireOwnedProfessor } from '@/lib/authz'
+import { isUserSuspended, consumeAiQuota } from '@/lib/rate-limit'
 import { isValidTimeZone } from '@/lib/time'
+import { serverError } from '@/lib/api-error'
 import { NextResponse } from 'next/server'
 
 type CourseInput = {
@@ -41,6 +43,10 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
+  if (await isUserSuspended(user.id)) {
+    return NextResponse.json({ error: 'Account suspended.' }, { status: 403 })
+  }
+
   const service = createServiceClient()
 
   const safeName = (typeof displayName === 'string' ? displayName.trim() : '') || 'Student'
@@ -57,7 +63,7 @@ export async function POST(request: Request) {
   )
 
   if (userError) {
-    return NextResponse.json({ error: userError.message }, { status: 500 })
+    return serverError('onboarding.complete.userUpsert', userError)
   }
 
   const courseIdMap: Record<number, string> = {}
@@ -75,51 +81,32 @@ export async function POST(request: Request) {
 
     if (!professorId) {
       const trimmedProfName = course.professorName.trim()
-      const { data: existingProf } = await service
+      // Upsert by (user_id, name): race-safe find-or-create (was select-then-insert,
+      // a TOCTOU that duplicated on concurrent/retried onboarding submits).
+      const { data: prof, error: profError } = await service
         .from('professors')
+        .upsert({ user_id: user.id, name: trimmedProfName }, { onConflict: 'user_id,name' })
         .select('professor_id')
-        .eq('user_id', user.id)
-        .eq('name', trimmedProfName)
-        .limit(1)
-        .maybeSingle()
+        .single()
 
-      if (existingProf) {
-        professorId = existingProf.professor_id
-      } else {
-        const { data: prof, error: profError } = await service
-          .from('professors')
-          .insert({ user_id: user.id, name: trimmedProfName })
-          .select('professor_id')
-          .single()
-
-        if (profError) {
-          return NextResponse.json({ error: profError.message }, { status: 500 })
-        }
-        professorId = prof.professor_id
+      if (profError) {
+        return serverError('onboarding.complete.professorUpsert', profError)
       }
+      professorId = prof.professor_id
     }
 
     const trimmedCourseName = course.name.trim()
     let courseId: string
-    const { data: existingCourse } = await service
-      .from('courses')
-      .select('course_id')
-      .eq('user_id', user.id)
-      .eq('name', trimmedCourseName)
-      .limit(1)
-      .maybeSingle()
-
-    if (existingCourse) {
-      courseId = existingCourse.course_id
-    } else {
+    {
+      // Upsert by (user_id, name): race-safe find-or-create for the course.
       const { data: courseRow, error: courseError } = await service
         .from('courses')
-        .insert({ user_id: user.id, professor_id: professorId, name: trimmedCourseName })
+        .upsert({ user_id: user.id, professor_id: professorId, name: trimmedCourseName }, { onConflict: 'user_id,name' })
         .select('course_id')
         .single()
 
       if (courseError) {
-        return NextResponse.json({ error: courseError.message }, { status: 500 })
+        return serverError('onboarding.complete.courseUpsert', courseError)
       }
       courseId = courseRow.course_id
     }
@@ -171,18 +158,33 @@ export async function POST(request: Request) {
 
   await initWiki(user.id)
 
-  // Run profiler for each syllabus (extracts topics + updates wiki)
-  // Use allSettled so one failure doesn't prevent the response or other jobs
-  const results = await Promise.allSettled(
-    syllabusJobs.map(job =>
-      runProfiler(user.id, job.materialId, job.courseId, job.courseName)
-    )
-  )
-  results.forEach((r, i) => {
-    if (r.status === 'rejected') {
-      console.error(`[onboarding] profiler job ${i} (${syllabusJobs[i].fileName}) rejected`, r.reason)
+  // Run profiler for each syllabus (extracts topics + updates wiki).
+  // Cap the syllabus-analysis AI work per user/day (abuse + free-tier infra guard,
+  // shared 'profiler' quota with course-create). Consume one unit PER syllabus so
+  // the charge matches course-create's per-run cost; jobs beyond the cap are
+  // skipped and onboarding still succeeds (courses are already created).
+  const allowedJobs: typeof syllabusJobs = []
+  for (const job of syllabusJobs) {
+    if (await consumeAiQuota(user.id, 'profiler')) {
+      allowedJobs.push(job)
+    } else {
+      console.warn(`[onboarding] profiler skipped for ${user.id} (${job.fileName}) — daily AI cap reached`)
     }
-  })
+  }
+
+  if (allowedJobs.length > 0) {
+    // Use allSettled so one failure doesn't prevent the response or other jobs
+    const results = await Promise.allSettled(
+      allowedJobs.map(job =>
+        runProfiler(user.id, job.materialId, job.courseId, job.courseName)
+      )
+    )
+    results.forEach((r, i) => {
+      if (r.status === 'rejected') {
+        console.error(`[onboarding] profiler job ${i} (${allowedJobs[i].fileName}) rejected`, r.reason)
+      }
+    })
+  }
 
   return NextResponse.json({ ok: true })
 }

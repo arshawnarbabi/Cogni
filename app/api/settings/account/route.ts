@@ -1,5 +1,6 @@
 import { createClient, createServiceClient } from '@/lib/supabase/server'
 import { deleteUserApiKey, deleteUserSecret } from '@/lib/vault'
+import { serverError } from '@/lib/api-error'
 import { NextResponse } from 'next/server'
 
 const STORAGE_PAGE = 1000
@@ -60,7 +61,7 @@ export async function DELETE() {
   // remaining direct auth.users children. This removes orphaned plaintext keys that
   // deleting only public.users would leave behind.
   const { error } = await service.auth.admin.deleteUser(user.id)
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+  if (error) return serverError('settings/account DELETE', error)
 
   await supabase.auth.signOut()
 

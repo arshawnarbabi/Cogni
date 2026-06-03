@@ -1,4 +1,5 @@
 import { createClient, createServiceClient } from '@/lib/supabase/server'
+import { serverError } from '@/lib/api-error'
 import { NextResponse } from 'next/server'
 
 export async function DELETE(
@@ -25,11 +26,11 @@ export async function DELETE(
 
   // Delete flashcards for this topic explicitly (FK is set null, not cascade)
   const { error: flashcardError } = await service.from('flashcards').delete().eq('topic_id', topicId).eq('user_id', user.id)
-  if (flashcardError) return NextResponse.json({ error: flashcardError.message }, { status: 500 })
+  if (flashcardError) return serverError('topics/[topicId] DELETE flashcards', flashcardError)
 
   // Delete topic — cascades to topic_mastery
   const { error: topicError } = await service.from('topics').delete().eq('topic_id', topicId).eq('user_id', user.id)
-  if (topicError) return NextResponse.json({ error: topicError.message }, { status: 500 })
+  if (topicError) return serverError('topics/[topicId] DELETE topic', topicError)
 
   return NextResponse.json({ ok: true })
 }

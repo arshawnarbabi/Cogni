@@ -40,5 +40,14 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'Failed to store key.' }, { status: 500 })
   }
 
+  // Read-back verification: confirm the key actually persisted (the vault store
+  // has been observed to report success without persisting), so the user never
+  // sees "saved" for a key that didn't save.
+  const { data: persisted } = await service.rpc('get_user_api_key', { p_user_id: user.id })
+  if (!persisted) {
+    console.error('[api-key] store_user_api_key reported success but key did not persist')
+    return NextResponse.json({ error: 'Failed to store key.' }, { status: 500 })
+  }
+
   return NextResponse.json({ ok: true })
 }

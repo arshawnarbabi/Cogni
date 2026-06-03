@@ -38,6 +38,19 @@ export async function setUserSecret(userId: string, secretName: string, value: s
     p_secret: value,
   })
   if (error) throw new Error(error.message)
+
+  // Read-back verification. store_user_secret has been observed to report success
+  // without actually persisting the secret. Confirm it's retrievable so a silent
+  // write failure surfaces as a thrown error (the UI shows "failed to save")
+  // instead of leaving the user with a key they believe saved but didn't.
+  const { data: persisted } = await service.rpc('get_user_secret', {
+    p_user_id: userId,
+    p_secret_name: secretName,
+  })
+  if (!persisted) {
+    console.error('[vault] store_user_secret reported success but secret did not persist', { secretName })
+    throw new Error('Vault write not confirmed — please try again.')
+  }
 }
 
 /** Permanently remove a named per-user secret from the Vault. Idempotent. */

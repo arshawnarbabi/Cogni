@@ -1,5 +1,6 @@
 import { createClient, createServiceClient } from '@/lib/supabase/server'
 import { NextResponse } from 'next/server'
+import { serverError, apiError } from '@/lib/api-error'
 
 const MAX_CHARS = 20_000
 
@@ -29,7 +30,7 @@ export async function GET(
       .eq('user_id', user.id)
       .single()
 
-    if (matError || !mat) return NextResponse.json({ error: `Material not found: ${matError?.message ?? 'no row'}` }, { status: 404 })
+    if (matError || !mat) return apiError('material_not_found', 404, { where: 'material-content/fetch', cause: matError })
     if (!mat.storage_path) return NextResponse.json({ error: 'Material has no storage path' }, { status: 422 })
 
     // Check if this is an image-only PDF by looking for embedding chunks
@@ -62,7 +63,7 @@ export async function GET(
       .download(mat.storage_path)
 
     if (dlErr || !fileData) {
-      return NextResponse.json({ error: `Storage download failed: ${dlErr?.message ?? 'no data'}` }, { status: 500 })
+      return serverError('material-content/download', dlErr)
     }
 
     let content = ''
@@ -76,7 +77,7 @@ export async function GET(
         const parsed = await pdfParse(buffer)
         content = (parsed.text as string).slice(0, MAX_CHARS)
       } catch (e) {
-        return NextResponse.json({ error: `Could not parse PDF: ${e instanceof Error ? e.message : 'unknown'}` }, { status: 422 })
+        return apiError('pdf_parse_failed', 422, { where: 'material-content/pdf-parse', cause: e })
       }
     } else {
       content = (await fileData.text()).slice(0, MAX_CHARS)
@@ -84,7 +85,6 @@ export async function GET(
 
     return NextResponse.json({ content, filename: mat.filename })
   } catch (e) {
-    console.error('[material-content] unhandled error:', e)
-    return NextResponse.json({ error: `Unexpected error: ${e instanceof Error ? e.message : 'unknown'}` }, { status: 500 })
+    return serverError('material-content', e)
   }
 }

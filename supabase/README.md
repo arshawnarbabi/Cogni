@@ -40,3 +40,22 @@ Or run these SQL files in the Supabase SQL editor **in this order** for a fresh 
 ## 7. One-time data backfills and migrations
 - `content-coverage-backfill.sql` — backfills `topics.content_coverage` from flashcard counts (run once)
 - `user-keys-vault-migration.sql` — moves any plaintext `user_keys` secrets (e.g. OpenAI keys) into Vault, then removes the plaintext rows (run after `vault-helpers.sql` and `user-keys.sql`)
+
+## 8. Hosted multi-tenant security hardening (required before public sign-up)
+- `security-hardening.sql` — REVOKEs the SECURITY-DEFINER vault/`review_card_atomic` RPCs from `anon`/`authenticated` (closes a direct-Data-API key-theft + cross-tenant-write hole), adds explicit `WITH CHECK` to the user-scoped RLS policies, and adds `unique(user_id, name)` to professors/courses. Idempotent. Run last. *(Already included at the end of `setup.sql`.)*
+
+> If you operate Cogni as a single shared deployment with open sign-up, section 8 is **mandatory** — without it any signed-up user can decrypt every user's API keys via the public Data API. (Self-host single-user deployments should still run it.)
+
+## 9. Usage limits / abuse guards (hosted multi-tenant)
+- `usage-limits.sql` — per-user daily caps on expensive AI routes (`daily_usage` + `consume_daily_quota`) and a `users.suspended` flag. Idempotent. *(Also included at the end of `setup.sql`.)*
+
+## 10. Production hardening (required before public sign-up)
+- `production-hardening.sql` — adds:
+  - **Consent/age audit** columns on `users` (`tos_version`, `tos_accepted_at`, `privacy_version`, `age_attested_at`) — written by `/api/auth/signup`.
+  - **`app_config`** singleton — runtime kill-switch (`signups_paused`, `ai_disabled`), signup gate (`signup_mode` = open/invite/edu, `allowed_email_domains`). Flip from the SQL editor for an instant change **without a redeploy** (effective within ~10s). Read by `lib/app-config.ts`.
+  - **`invite_codes`** + `consume_invite_code()` — single-use codes for `signup_mode='invite'`.
+  - **`audit_log`** + `operator_set_suspended()` — append-only security event log + audited operator suspend/unsuspend (used by `/api/operator/*`).
+  - **`purge_old_daily_usage()`** — TTL cleanup for the `daily_usage` counter (called weekly by the maintenance cron).
+  Idempotent. Run last. *(Already included at the end of `setup.sql`.)*
+
+> Operator toggles after deploy (SQL editor): pause signups → `update app_config set signups_paused=true;` · stop all AI → `update app_config set ai_disabled=true;` · invite-only → `update app_config set signup_mode='invite';` then `insert into invite_codes (code) values ('CODE1');` · .edu-only → `update app_config set signup_mode='edu', allowed_email_domains='{edu}';`

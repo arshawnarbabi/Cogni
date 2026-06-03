@@ -1,4 +1,5 @@
 import { createClient, createServiceClient } from '@/lib/supabase/server'
+import { serverError } from '@/lib/api-error'
 import { NextResponse } from 'next/server'
 import { ICON_NAMES } from '@/lib/course-icon-names'
 
@@ -36,7 +37,7 @@ export async function DELETE(
 
   if (storagePaths.length > 0) {
     const { error: storageError } = await service.storage.from('materials').remove(storagePaths)
-    if (storageError) return NextResponse.json({ error: storageError.message }, { status: 500 })
+    if (storageError) return serverError('courses/delete:materials-storage', storageError)
   }
 
   // Delete professor wiki file — only if no other course of this user still
@@ -75,7 +76,7 @@ export async function DELETE(
 
   if (filePaths.length > 0) {
     const { error: filesError } = await service.storage.from('course-files').remove(filePaths)
-    if (filesError) return NextResponse.json({ error: filesError.message }, { status: 500 })
+    if (filesError) return serverError('courses/delete:course-files-storage', filesError)
   }
 
   // Explicitly delete materials and their embeddings. materials.course_id is
@@ -95,14 +96,14 @@ export async function DELETE(
       .delete()
       .in('material_id', materialIds)
       .eq('user_id', user.id)
-    if (embErr) return NextResponse.json({ error: embErr.message }, { status: 500 })
+    if (embErr) return serverError('courses/delete:embeddings', embErr)
 
     const { error: matErr } = await service
       .from('materials')
       .delete()
       .eq('course_id', courseId)
       .eq('user_id', user.id)
-    if (matErr) return NextResponse.json({ error: matErr.message }, { status: 500 })
+    if (matErr) return serverError('courses/delete:materials', matErr)
   }
 
   // Delete course row — cascades to topics, flashcards, test_results, session_messages.
@@ -112,7 +113,7 @@ export async function DELETE(
     .delete()
     .eq('course_id', courseId)
     .eq('user_id', user.id)
-  if (deleteError) return NextResponse.json({ error: deleteError.message }, { status: 500 })
+  if (deleteError) return serverError('courses/delete:course', deleteError)
 
   return NextResponse.json({ ok: true })
 }
@@ -139,6 +140,6 @@ export async function PATCH(
     .eq('course_id', courseId)
     .eq('user_id', user.id)
 
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+  if (error) return serverError('courses/patch:icon', error)
   return NextResponse.json({ ok: true })
 }

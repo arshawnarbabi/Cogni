@@ -520,7 +520,12 @@ export async function generateUpcomingPreview(userId: string): Promise<void> {
   }
 
   if (rowsToInsert.length > 0) {
-    const { error } = await service.from('study_plan').insert(rowsToInsert)
-    if (error) console.error('[scheduler] generateUpcomingPreview insert failed', error)
+    // Upsert (ignore duplicates) so a race between this preview and a concurrent
+    // run / the Today-page scheduler can't throw on the unique(user_id, plan_date)
+    // constraint. Existing rows are left as-is.
+    const { error } = await service
+      .from('study_plan')
+      .upsert(rowsToInsert, { onConflict: 'user_id,plan_date', ignoreDuplicates: true })
+    if (error) console.error('[scheduler] generateUpcomingPreview upsert failed', error)
   }
 }

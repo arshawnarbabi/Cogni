@@ -3,6 +3,12 @@ import { classifyMaterial } from '@/lib/agents/inbox'
 import { runScheduler } from '@/lib/agents/scheduler'
 import { requireOwnedCourse } from '@/lib/authz'
 import { hasExpectedFileSignature } from '@/lib/file-validation'
+import { wouldExceedStorageLimit } from '@/lib/storage-quota'
+import { aiRouteGuard } from '@/lib/rate-limit'
+import { moderateImage } from '@/lib/moderation'
+import { getUserKey } from '@/lib/user-keys'
+import { auditLog } from '@/lib/app-config'
+import { serverError } from '@/lib/api-error'
 import { NextResponse } from 'next/server'
 
 export async function POST(request: Request) {
@@ -29,6 +35,17 @@ export async function POST(request: Request) {
     }
   }
 
+  // Per-user storage ceiling (protects the shared free-tier project).
+  const incomingBytes = file ? file.size : Buffer.byteLength(textContent ?? '', 'utf8')
+  if (await wouldExceedStorageLimit(user.id, incomingBytes)) {
+    return NextResponse.json({ error: 'Storage limit reached. Delete some materials to free up space.' }, { status: 413 })
+  }
+
+  // Reject suspended accounts + enforce the per-user daily classification cap
+  // before storing anything or invoking the AI classifier.
+  const guard = await aiRouteGuard(user.id, 'inbox_classify')
+  if (guard) return NextResponse.json({ error: guard.error }, { status: guard.status })
+
   let filename: string
   let ext: string
   let fileBlob: Blob
@@ -54,6 +71,19 @@ export async function POST(request: Request) {
       png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp',
     }
     contentType = mimeMap[ext] ?? file.type ?? 'application/octet-stream'
+
+    // Content moderation for uploaded images — screen BEFORE storing so flagged
+    // content is never persisted (Acceptable Use Policy). Runs on the user's BYOK
+    // OpenAI key; skipped (logged) if they have none.
+    if (['png', 'jpg', 'jpeg', 'webp'].includes(ext)) {
+      const base64 = Buffer.from(await file.arrayBuffer()).toString('base64')
+      const openaiKey = await getUserKey(user.id, 'openai_key')
+      const mod = await moderateImage(openaiKey, { base64, mimeType: contentType })
+      if (mod.flagged) {
+        await auditLog('moderation_block', { actor: user.id, subjectUserId: user.id, detail: { filename, categories: mod.categories } })
+        return NextResponse.json({ error: 'content_rejected' }, { status: 422 })
+      }
+    }
   } else {
     if (textContent!.length > 500_000) {
       return NextResponse.json({ error: 'Text too long (max 500,000 chars).' }, { status: 413 })
@@ -109,7 +139,7 @@ export async function POST(request: Request) {
     .upload(storagePath, fileBlob, { contentType, upsert: false })
 
   if (uploadError) {
-    return NextResponse.json({ error: uploadError.message }, { status: 500 })
+    return serverError('inbox/upload', uploadError)
   }
 
   const { data: material, error: materialError } = await service
@@ -127,7 +157,7 @@ export async function POST(request: Request) {
 
   if (materialError || !material) {
     await service.storage.from('materials').remove([storagePath])
-    return NextResponse.json({ error: materialError?.message ?? 'DB error' }, { status: 500 })
+    return serverError('inbox/upload', materialError)
   }
 
   const { data: inboxItem, error: inboxError } = await service
@@ -143,7 +173,7 @@ export async function POST(request: Request) {
   if (inboxError || !inboxItem) {
     await service.storage.from('materials').remove([storagePath])
     await service.from('materials').delete().eq('material_id', material.material_id).eq('user_id', user.id)
-    return NextResponse.json({ error: inboxError?.message ?? 'DB error' }, { status: 500 })
+    return serverError('inbox/upload', inboxError)
   }
 
   let result
@@ -171,10 +201,7 @@ export async function POST(request: Request) {
       .update({ classification_status: 'failed' })
       .eq('material_id', material.material_id)
       .eq('user_id', user.id)
-    return NextResponse.json(
-      { error: `File was saved but classification failed: ${e instanceof Error ? e.message : 'unknown error'}. Try uploading again.` },
-      { status: 500 }
-    )
+    return serverError('inbox/upload:classify', e)
   }
 
   // Fire-and-forget: rerun scheduler so today's plan reflects the new material

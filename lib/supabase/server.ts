@@ -32,11 +32,23 @@ export async function createClient() {
 // site). Switching to the typed ESM import would propagate generic inference
 // through every agent file. Safe to revisit once the join-cast patterns are
 // replaced with generated database types.
-export function createServiceClient() {
+//
+// Memoized at module scope: the service client holds no per-user state
+// (persistSession: false) and is safe to reuse across requests within a warm
+// serverless instance, avoiding a fresh client construction on every call.
+let serviceClient: ReturnType<typeof buildServiceClient> | null = null
+
+function buildServiceClient() {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { createClient } = require('@supabase/supabase-js')
   return createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
+    process.env.SUPABASE_SERVICE_ROLE_KEY!,
+    { auth: { persistSession: false, autoRefreshToken: false } }
   )
+}
+
+export function createServiceClient() {
+  if (!serviceClient) serviceClient = buildServiceClient()
+  return serviceClient
 }
