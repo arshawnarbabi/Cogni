@@ -1,6 +1,6 @@
 # Cogni — Deployment Runbook (manual `[you]` steps)
 
-All the **code-side** production-readiness work is done on the `hosted-migration` branch.
+All the **code-side** production-readiness work is done — merged to `main` and released as **v1.3.0**.
 This is the ordered list of the **manual steps only you can do** (accounts, dashboards, decisions). Do them in order. See `.env.example` for every variable.
 
 > ## 💸 Cost: $0 — this whole pilot runs on free tiers
@@ -19,21 +19,27 @@ This is the ordered list of the **manual steps only you can do** (accounts, dash
 
 ## 1. Supabase project
 1. Create the **production Supabase project** (region is immutable — pick closest to your users; you're at the 2-project free limit, so free a slot).
-2. **Enable the `supabase_vault` extension** (Database → Extensions) **before** running SQL — BYOK breaks without it.
+2. **Enable the `supabase_vault` extension** (Database → Extensions) **before** running SQL — BYOK breaks without it. *(On newer projects Vault is often already enabled by default — just verify it's on.)*
 3. Run **`supabase/setup.sql`** once in the SQL editor (it bundles sections 1–10, idempotent).
 4. **Verify:** RLS `on` for every table; the 4 storage buckets exist; the Vault / `review_card_atomic` RPCs are **not** granted to `anon`.
 
 ## 2. Email (do before turning on confirmation)
-1. Create a **Resend** account + verify a sending domain (set SPF/DKIM/DMARC).
-2. Supabase Dashboard → Authentication → Emails → **SMTP**: host `smtp.resend.com`, port `465`, user `resend`, pass = Resend API key, sender = an address on your verified domain.
+1. Create a **Resend** account → **Domains → Add Domain** and verify a sending domain. Verification needs **SPF + DKIM** DNS records only (✏️ *DMARC is NOT required for verification — it's optional/recommended; if you add it, start with `p=none`*).
+2. Supabase Dashboard → Authentication → **Emails → SMTP Settings** (its own page): enable custom SMTP, then host `smtp.resend.com`, port `465`, user `resend`, pass = a Resend **API key**, sender = an address on your verified domain. *(These Resend SMTP values were re-verified correct, June 2026.)*
 3. Send a **real test email** and confirm it lands in a Gmail/Outlook **inbox, not spam**.
-4. Authentication → Providers → Email → **turn ON "Confirm email."**
+4. Authentication → **Sign In / Providers** → Email → **turn ON "Confirm email"** (✏️ *the sidebar item formerly called "Providers" is now "Sign In / Providers"*).
 
 ## 3. Google OAuth (optional but recommended)
-- Supabase → Authentication → Providers → Google: add client ID/secret from Google Cloud, and set the redirect URI to `https://<your-domain>/auth/callback`.
+✏️ *Corrected — the redirect URI is the #1 thing people get wrong here.* Google sign-in needs an OAuth client in **Google Cloud**, with the client ID/secret pasted into **Supabase**:
+1. **Google Cloud Console → Google Auth Platform → Clients** (OAuth moved here in 2026) → **Create client → Web application**. First time, complete the app registration under **Branding** (app name + support email) and set **Audience → External**.
+2. In that client, add an **Authorized redirect URI** of exactly `https://<your-project-ref>.supabase.co/auth/v1/callback` — this is the **Supabase** auth callback, **NOT** your app's `/auth/callback`. *(This is a Google Cloud field; Supabase only stores the client ID/secret.)*
+3. Copy the **Client ID + Secret** into **Supabase → Authentication → Sign In / Providers → Google** and enable it.
+4. Your app's own domain + `/auth/callback` go in Supabase → Authentication → **URL Configuration** (Section 4, step 5) — not in Google Cloud.
+
+*(Supabase social login only requests basic identity scopes, so Google doesn't force a verification/test-user list for these.)*
 
 ## 4. Vercel — FREE (Hobby) plan is enough
-1. Import the repo, deploy from `hosted-migration` (or merge to `main` first).
+1. Import the repo and deploy from `main`.
 2. **Stay on Hobby (free).** Ensure **Fluid Compute is enabled** (Settings → Functions — it's the default). With Fluid Compute, Hobby allows `maxDuration` up to **300s**, so the crons run fine — *no Pro upgrade needed.* (Cron limits on Hobby: up to 100 jobs/project, once-per-day max frequency, fired within the scheduled hour — all of which our 2 daily + 1 weekly crons satisfy.)
 3. Set env vars (Production scope) per `.env.example`. **Required:** `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `NEXT_PUBLIC_APP_URL`, `CRON_SECRET`. Confirm `MOCK_AGENTS` is **unset**.
 4. Attach your **custom domain** (free on Hobby); set `NEXT_PUBLIC_APP_URL` to it (build-time-baked, so set before the prod build).
@@ -43,7 +49,7 @@ This is the ordered list of the **manual steps only you can do** (accounts, dash
 
 ## 5. Turn on the optional safety/ops features (recommended)
 Set these env vars in Vercel (all optional — each is a no-op if unset):
-- **CAPTCHA:** `NEXT_PUBLIC_TURNSTILE_SITE_KEY` + `TURNSTILE_SECRET_KEY` (Cloudflare Turnstile). **Also enable native CAPTCHA** in Supabase → Authentication → Bot & Abuse Protection (paste the same Turnstile secret). The app already forwards the token to Supabase, so this makes CAPTCHA enforced on *every* signup path — including a direct anon `signUp` — not just the app's own form. *(Gating — paused/invite/.edu — is already DB-enforced and bypass-proof without this; native CAPTCHA closes the bot-signup vector in `open` mode.)*
+- **CAPTCHA:** `NEXT_PUBLIC_TURNSTILE_SITE_KEY` + `TURNSTILE_SECRET_KEY` (Cloudflare dashboard → **Turnstile → Add widget** → copy the Sitekey + Secret). **Also enable native CAPTCHA** in Supabase → **Authentication → Settings → "Bot and Abuse Protection"** → *Enable CAPTCHA protection* → choose **Turnstile** → paste the secret (✏️ *corrected path — it lives under Auth Settings, not a top-level menu*). The app already forwards the token to Supabase, so this makes CAPTCHA enforced on *every* signup path — including a direct anon `signUp` — not just the app's own form. *(Gating — paused/invite/.edu — is already DB-enforced and bypass-proof without this; native CAPTCHA closes the bot-signup vector in `open` mode.)*
 - **Error monitoring:** `SENTRY_DSN` + `NEXT_PUBLIC_SENTRY_DSN` (+ `SENTRY_ORG`/`SENTRY_PROJECT`/`SENTRY_AUTH_TOKEN` for source maps).
 - **Cron alerting:** `CRON_HEARTBEAT_SCHEDULER_URL`, `CRON_HEARTBEAT_NUDGE_URL`, `CRON_HEARTBEAT_MAINTENANCE_URL` (Healthchecks.io — create one check per cron, with the expected schedule).
 - **Operator console:** `OPERATOR_SECRET` (long random string).
@@ -51,9 +57,9 @@ Set these env vars in Vercel (all optional — each is a no-op if unset):
 
 ## 6. Decisions to make (then I wire/confirm)
 - **Signup gate:** default `open`. To restrict, in SQL: `update app_config set signup_mode='invite';` (then `insert into invite_codes(code) values ('CODE');`) or `update app_config set signup_mode='edu', allowed_email_domains='{edu}';`.
-- **Backups:** the free tier has **no PITR and limited/no automated backups** — this is the one real free-tier *limitation* (not a charge). For a small pilot it's an accepted risk; mitigate by exporting your DB occasionally (`pg_dump`) and writing down a rollback plan. Upgrade Supabase only when your data is worth guaranteed backups.
+- **Backups:** the free tier has **no PITR and no automated daily backups** (both start on Supabase Pro) — this is the one real free-tier *limitation* (not a charge). For a small pilot it's an accepted risk; mitigate by exporting your DB occasionally (`pg_dump`) and writing down a rollback plan. Upgrade Supabase only when your data is worth guaranteed backups.
 - **Legal:** fill the real values in `lib/legal.ts` (`COMPANY_NAME`, `CONTACT_EMAIL`, `GOVERNING_LAW`) and remove the amber operator-note block in `app/legal/privacy/page.tsx` after confirming each AI provider's data-retention posture. Have counsel review the Terms/Privacy/AUP before public launch.
-- **Data API exposure:** in Supabase → Settings → API, confirm which schemas are exposed via the public Data API.
+- **Data API exposure:** now at Supabase → **Integrations → Data API → Settings** (✏️ *moved from Settings → API*). **Good news for Cogni — nothing to do here:** the app never uses the public Data API (every table query is server-side via the service-role key; the browser only does auth). So Supabase's 2026 change — public tables are no longer auto-exposed to `anon`/`authenticated` (default for new projects since May 30 2026; all projects Oct 30 2026) — **does not affect Cogni** and actually shrinks its attack surface. *(Verified against the code: no browser-side table queries, no reliance on anon/authenticated grants.)*
 
 ## 7. Pre-launch verification (on prod, not local)
 - Run the test suite against prod config.
