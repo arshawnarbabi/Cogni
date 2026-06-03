@@ -6,6 +6,8 @@
   <img src="https://img.shields.io/badge/TypeScript-5-3178C6" alt="TypeScript" />
   <img src="https://img.shields.io/badge/Supabase-PostgreSQL-3ECF8E" alt="Supabase" />
   <img src="https://img.shields.io/badge/Claude-Sonnet%204.6-CC785C" alt="Claude" />
+  <img src="https://img.shields.io/badge/release-v1.3.0-1D4ED8" alt="v1.3.0" />
+  <img src="https://img.shields.io/badge/hosting-self--host%20%7C%20multi--tenant-7C3AED" alt="Self-host or multi-tenant" />
   <img src="https://img.shields.io/badge/status-beta-F59E0B" alt="Beta" />
   <a href="https://trycogni.arshawnarbabi.com/"><img src="https://img.shields.io/badge/website-trycogni.arshawnarbabi.com-1D4ED8" alt="Website" /></a>
   <a href="https://vercel.com/new/clone?repository-url=https://github.com/arshawnarbabi/Cogni"><img src="https://vercel.com/button" alt="Deploy with Vercel" /></a>
@@ -13,7 +15,11 @@
 
 <br />
 
-Cogni decides what to study, when to study, and how — so you just show up. Feed it your syllabi, lecture notes, past exams, and course materials. It classifies and processes everything automatically, extracts your topics, maps your professor's grading weights, and generates a prioritized study plan every morning based on your current mastery and upcoming exams. The tutor pulls from your actual course materials. Flashcards are scheduled by FSRS at the card and topic level. Study blocks land in your Google Calendar. All you do is study. BYOK, self-hosted on Vercel + Supabase.
+Cogni decides what to study, when to study, and how — so you just show up. Feed it your syllabi, lecture notes, past exams, and course materials. It classifies and processes everything automatically, extracts your topics, maps your professor's grading weights, and generates a prioritized study plan every morning based on your current mastery and upcoming exams. The tutor pulls from your actual course materials. Flashcards are scheduled by FSRS at the card and topic level. Study blocks land in your Google Calendar. All you do is study. Always BYOK on Vercel + Supabase.
+
+Run it two ways: **self-hosted** for a single user, or **hosted multi-tenant** — one operator running a public instance for many users (open / invite-code / `.edu` signup gating, per-user AI quotas, kill-switches, legal pages, and more). Either way it stays BYOK and self-hostable.
+
+> **v1.3.0 — "Production Hardening · Multi-Tenant Ready":** Cogni is now production-hardened for public, multi-tenant hosting in addition to single-user self-hosting. Everything is additive and BYOK; see [Production / multi-tenant hosting](#-production--multi-tenant-hosting).
 
 > **Beta:** Cogni is under active development. Expect rough edges, verify important study data, and test thoroughly before relying on it for critical coursework.
 
@@ -153,13 +159,13 @@ Exam proximity multipliers: >30 days = 1×, >14 = 1.5×, >7 = 2×, >3 = 3×, ≤
 
 ## 🚀 Setup / Deployment
 
-> Setup takes ~30–45 minutes. You'll need a Supabase account and a Vercel account.
+> Setup takes ~30–45 minutes. You'll need a Supabase account and a Vercel account. The steps below cover a quick **single-user self-host**; for **production multi-tenant** hosting, follow [`DEPLOYMENT.md`](DEPLOYMENT.md) (see [Production / multi-tenant hosting](#-production--multi-tenant-hosting)).
 
 **Step 1 — Fork and deploy**
 
 [![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/arshawnarbabi/Cogni)
 
-Fork the repo and deploy to Vercel, or run locally with `npm run dev`.
+Fork the repo and deploy to Vercel, or run locally with `npm run dev`. **Vercel Hobby (free) is sufficient** — Fluid Compute gives crons a 300s duration and 100 crons per project, so you don't need Pro to run the daily scheduler.
 
 **Step 2 — Supabase project**
 
@@ -181,10 +187,23 @@ Add these to your Vercel project settings (or `.env.local` for local dev):
 | `NEXT_PUBLIC_APP_URL` | ✅ | Your deployment URL (e.g. `https://your-app.vercel.app`) |
 | `GOOGLE_CALENDAR_CLIENT_ID` | Optional | Google Cloud Console — Calendar OAuth |
 | `GOOGLE_CALENDAR_CLIENT_SECRET` | Optional | Google Cloud Console — Calendar OAuth |
+| `NEXT_PUBLIC_TURNSTILE_SITE_KEY` | Optional | Cloudflare Turnstile CAPTCHA — public site key |
+| `TURNSTILE_SECRET_KEY` | Optional | Cloudflare Turnstile CAPTCHA — secret key |
+| `SENTRY_DSN` | Optional | Sentry error monitoring — server DSN |
+| `NEXT_PUBLIC_SENTRY_DSN` | Optional | Sentry error monitoring — client DSN |
+| `SENTRY_ORG` / `SENTRY_PROJECT` / `SENTRY_AUTH_TOKEN` | Optional | Sentry source-map upload at build time |
+| `CRON_HEARTBEAT_SCHEDULER_URL` | Optional | Heartbeat alert URL for the scheduler cron |
+| `CRON_HEARTBEAT_NUDGE_URL` | Optional | Heartbeat alert URL for the nudge cron |
+| `CRON_HEARTBEAT_MAINTENANCE_URL` | Optional | Heartbeat alert URL for the maintenance cron |
+| `OPERATOR_SECRET` | Optional | Bearer secret guarding the operator console + audit endpoints |
+
+The optional vars above the calendar row power v1.3.0's [production / multi-tenant hardening](#-production--multi-tenant-hosting). Every one is a **no-op if unset**, so a single-user self-host can ignore them.
 
 Anthropic and OpenAI keys are **not** env vars. Users add them in Settings after deploying.
 
 > Set `CRON_SECRET` yourself in Vercel and keep it long and random. It secures the daily scheduler (5am UTC) and nudge check (6am UTC) endpoints so only callers with the bearer token can invoke them.
+
+> **Email confirmation / password reset** uses transactional email via **Resend**, configured in the **Supabase dashboard** (Authentication → SMTP), not via env vars.
 
 **Step 4 — Google OAuth (sign-in)**
 
@@ -219,6 +238,32 @@ Make sure `GOOGLE_CALENDAR_CLIENT_ID` and `GOOGLE_CALENDAR_CLIENT_SECRET` are se
 
 <br />
 
+## 🏢 Production / multi-tenant hosting
+
+Cogni runs two ways:
+
+- **Quick self-host (single user)** — the 7 steps above. Deploy, add your own key, study. Nothing below is required.
+- **Production multi-tenant** — one operator hosting a public instance for many users. Everything is additive and stays BYOK (each user pays their own Anthropic/OpenAI usage with their own key). Follow [`DEPLOYMENT.md`](DEPLOYMENT.md) — the full production runbook of manual steps.
+
+**Free-tier deployable ($0).** A full production instance runs on free tiers: **Vercel Hobby** (Fluid Compute provides 300s cron duration and 100 crons per project — Pro is not needed) + **Supabase Free** + **Resend** free email. The operator pays nothing for AI itself, since it's BYOK.
+
+**Hardening highlights (v1.3.0):**
+
+- **Bypass-proof signup gating** — open / invite-code / `.edu` modes enforced at the **database layer** (trigger on `auth.users`), so it covers the server route, direct signups, and OAuth.
+- **CAPTCHA** — Cloudflare Turnstile on signup and password reset.
+- **Consent, age capture, and password reset** — collected at signup (email + OAuth), with a full password-reset flow.
+- **Legal pages** — Terms, Privacy (with AI sub-processor disclosure), and Acceptable-Use.
+- **Per-user AI quotas + suspend** — daily AI quotas and account suspend enforced on every AI route.
+- **Image moderation** — applied on uploads.
+- **Operator kill-switches** — instantly pause signups or disable AI via runtime config, no redeploy.
+- **Operator console + audit log** — operator console with an append-only audit log.
+- **GDPR data export** — per-user data export.
+- **Observability** — Sentry error monitoring, cron heartbeat alerting, and an `/api/health` endpoint. Plus Report-Only CSP and security headers, ~58 raw error leaks sanitized into stable codes, and Vault read-back verification on key storage.
+
+All of the above is wired through the optional env vars in the [Setup / Deployment](#-setup--deployment) env table (step 3) — every one is a no-op if unset, so existing single-user deployments are unaffected. `supabase/setup.sql` already bundles the production-hardening migrations (its "section 10" block).
+
+<br />
+
 ## 🔑 API Keys
 
 **Anthropic (required)** — Powers the tutor, profiler, flashcard generation, quizzes, and inbox classification. Get a key at [console.anthropic.com](https://console.anthropic.com). Typical usage for a single student: ~$2–5/month.
@@ -240,7 +285,7 @@ cp .env.example .env.local
 npm run dev
 ```
 
-Vercel Cron Jobs do not run locally (scheduler fires at 5am UTC, nudge at 6am UTC in production). The scheduler runs automatically when you navigate to Today if no plan exists for today. In local development (`NODE_ENV=development`), a Dev Tools section in Settings exposes a reset-account helper.
+Vercel Cron Jobs do not run locally (scheduler fires at 5am UTC, nudge at 6am UTC in production — Vercel Hobby/Fluid Compute is enough to run them). The scheduler runs automatically when you navigate to Today if no plan exists for today. In local development (`NODE_ENV=development`), a Dev Tools section in Settings exposes a reset-account helper.
 
 <br />
 

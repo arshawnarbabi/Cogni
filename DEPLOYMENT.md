@@ -1,7 +1,7 @@
 # Cogni — Deployment Runbook (manual `[you]` steps)
 
 All the **code-side** production-readiness work is done on the `hosted-migration` branch.
-This is the ordered list of the **manual steps only you can do** (accounts, dashboards, decisions). Do them in order. See `PRODUCTION_CHECKLIST.md` for the full picture and `.env.example` for every variable.
+This is the ordered list of the **manual steps only you can do** (accounts, dashboards, decisions). Do them in order. See `.env.example` for every variable.
 
 > ## 💸 Cost: $0 — this whole pilot runs on free tiers
 > | Service | Plan | Note |
