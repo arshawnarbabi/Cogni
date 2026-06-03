@@ -1,4 +1,5 @@
 import { createServiceClient } from '@/lib/supabase/server'
+import { auditLog } from '@/lib/app-config'
 import { NextResponse } from 'next/server'
 import { timingSafeEqual } from 'node:crypto'
 
@@ -40,17 +41,37 @@ export async function POST(request: Request) {
   if (!process.env.OPERATOR_SECRET) return NextResponse.json({ error: 'not_found' }, { status: 404 })
   if (!authorized(request)) return NextResponse.json({ error: 'unauthorized' }, { status: 401 })
 
-  let body: { userId?: string; suspended?: boolean; reason?: string }
+  let body: { userId?: string; suspended?: boolean; reason?: string; setPassword?: string }
   try {
     body = await request.json()
   } catch {
     return NextResponse.json({ error: 'bad_request' }, { status: 400 })
   }
-  if (!body.userId || typeof body.suspended !== 'boolean') {
+  if (!body.userId) {
     return NextResponse.json({ error: 'bad_request' }, { status: 400 })
   }
 
   const service = createServiceClient()
+
+  // Operator-assisted password reset — the recovery path when email/self-serve
+  // reset is disabled. Sets the user's password directly via the Admin API.
+  if (typeof body.setPassword === 'string') {
+    if (body.setPassword.length < 8) {
+      return NextResponse.json({ error: 'weak_password' }, { status: 400 })
+    }
+    const { error } = await service.auth.admin.updateUserById(body.userId, { password: body.setPassword })
+    if (error) {
+      console.error('[operator] set password failed', error)
+      return NextResponse.json({ error: 'operation_failed' }, { status: 500 })
+    }
+    await auditLog('operator_set_password', { actor: 'operator', subjectUserId: body.userId, detail: { reason: body.reason ?? '' } })
+    return NextResponse.json({ ok: true, userId: body.userId, passwordReset: true })
+  }
+
+  // Suspend / unsuspend.
+  if (typeof body.suspended !== 'boolean') {
+    return NextResponse.json({ error: 'bad_request' }, { status: 400 })
+  }
   // operator_set_suspended updates users.suspended AND writes an audit_log row atomically.
   const { error } = await service.rpc('operator_set_suspended', {
     p_user_id: body.userId,

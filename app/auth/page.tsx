@@ -27,6 +27,12 @@ const SIGNUP_ERRORS: Record<string, string> = {
   signup_failed: 'Could not create your account. Please try again.',
 }
 
+// Password reset requires transactional email (SMTP). Deployments that run
+// without email set NEXT_PUBLIC_PASSWORD_RESET_ENABLED=false to hide the
+// (non-functional) "Forgot password?" flow and warn users their password can't
+// be self-reset. Defaults to enabled.
+const PASSWORD_RESET_ENABLED = process.env.NEXT_PUBLIC_PASSWORD_RESET_ENABLED !== 'false'
+
 export default function AuthPage() {
   const router = useRouter()
   const supabase = createClient()
@@ -194,7 +200,7 @@ export default function AuthPage() {
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
                     <Label htmlFor="password">Password</Label>
-                    {mode === 'signin' && (
+                    {mode === 'signin' && PASSWORD_RESET_ENABLED && (
                       <button
                         type="button"
                         onClick={() => setMode('forgot')}
@@ -234,6 +240,13 @@ export default function AuthPage() {
 
               {mode === 'signup' && (
                 <>
+                  {!PASSWORD_RESET_ENABLED && (
+                    <p className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-700 dark:text-amber-400">
+                      ⚠️ <strong>Save your password somewhere safe.</strong> Password reset isn&apos;t available on this
+                      instance, so a forgotten password can&apos;t be recovered. Prefer <strong>Continue with Google</strong> above
+                      — it needs no password.
+                    </p>
+                  )}
                   <label className="flex items-start gap-2 text-xs text-muted-foreground">
                     <input
                       type="checkbox"

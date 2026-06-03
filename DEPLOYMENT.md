@@ -23,7 +23,16 @@ This is the ordered list of the **manual steps only you can do** (accounts, dash
 3. Run **`supabase/setup.sql`** once in the SQL editor (it bundles sections 1–10, idempotent).
 4. **Verify:** RLS `on` for every table; the 4 storage buckets exist; the Vault / `review_card_atomic` RPCs are **not** granted to `anon`.
 
-## 2. Email (do before turning on confirmation)
+## 2. Email
+
+> ### ✅ Recommended for the pilot: **no email** ($0, zero setup)
+> Skip the Resend setup below entirely. Instead:
+> 1. Supabase → Authentication → **Sign In / Providers → Email** → leave **"Confirm email" OFF**.
+> 2. In Vercel, set **`NEXT_PUBLIC_PASSWORD_RESET_ENABLED=false`**.
+>
+> Users then sign up with email/password (no confirmation email) or **Google**. The only tradeoff is **no self-serve password reset** — the auth page warns users, and you can reset a locked-out user from the **operator console** (see the Operator runbook below). Wire up Resend (steps below) only when you open to public signup, to block fake-email abuse.
+
+**Full email setup (Resend) — for when you open to public signup:** *(do before turning on confirmation)*
 1. Create a **Resend** account → **Domains → Add Domain** and verify a sending domain. Verification needs **SPF + DKIM** DNS records only (✏️ *DMARC is NOT required for verification — it's optional/recommended; if you add it, start with `p=none`*).
 2. Supabase Dashboard → Authentication → **Emails → SMTP Settings** (its own page): enable custom SMTP, then host `smtp.resend.com`, port `465`, user `resend`, pass = a Resend **API key**, sender = an address on your verified domain. *(These Resend SMTP values were re-verified correct, June 2026.)*
 3. Send a **real test email** and confirm it lands in a Gmail/Outlook **inbox, not spam**.
@@ -78,6 +87,7 @@ Set these env vars in Vercel (all optional — each is a no-op if unset):
 | **Hard-stop all AI** (cost/abuse spike) | `update app_config set ai_disabled = true;` |
 | **Go invite-only** | `update app_config set signup_mode='invite';` then `insert into invite_codes(code) values ('ABC123');` |
 | **Suspend a user** | `POST /api/operator` with header `x-operator-secret: <OPERATOR_SECRET>`, body `{"userId":"…","suspended":true,"reason":"…"}` |
+| **Reset a user's password** (no-email recovery) | `POST /api/operator` with the same header, body `{"userId":"…","setPassword":"<new-password>"}` — sets it directly via the Admin API and audits it. This is the recovery path when self-serve reset is off. *(You can also do it in Supabase → Authentication → Users.)* |
 | **Review activity** | `GET /api/operator` (recent audit log + suspended users), or read `audit_log` in SQL |
 | **Tune AI caps** | edit `DAILY_LIMITS` in `lib/rate-limit.ts` (redeploy) |
 
