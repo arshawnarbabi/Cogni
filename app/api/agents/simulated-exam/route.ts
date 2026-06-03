@@ -1,6 +1,7 @@
 import { createClient } from '@/lib/supabase/server'
 import { generateSimulatedExam } from '@/lib/agents/practice-quiz'
 import { requireOwnedCourse } from '@/lib/authz'
+import { aiRouteGuard } from '@/lib/rate-limit'
 import { NextResponse } from 'next/server'
 
 const MOCK_EXAM = {
@@ -60,8 +61,11 @@ export async function POST(request: Request) {
   if (!ownedCourse) return NextResponse.json({ error: 'Course not found' }, { status: 404 })
 
   if (process.env.MOCK_AGENTS === 'true' && process.env.NODE_ENV !== 'production') {
-    return NextResponse.json(MOCK_EXAM)
+    return NextResponse.json(MOCK_EXAM) // mock path is free — not rate-limited
   }
+
+  const guard = await aiRouteGuard(user.id, 'simulated_exam')
+  if (guard) return NextResponse.json({ error: guard.error }, { status: guard.status })
 
   // Content guard — require at least some uploaded material
   const { createServiceClient } = await import('@/lib/supabase/server')

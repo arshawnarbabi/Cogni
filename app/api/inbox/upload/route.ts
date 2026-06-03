@@ -3,6 +3,7 @@ import { classifyMaterial } from '@/lib/agents/inbox'
 import { runScheduler } from '@/lib/agents/scheduler'
 import { requireOwnedCourse } from '@/lib/authz'
 import { hasExpectedFileSignature } from '@/lib/file-validation'
+import { wouldExceedStorageLimit } from '@/lib/storage-quota'
 import { NextResponse } from 'next/server'
 
 export async function POST(request: Request) {
@@ -27,6 +28,12 @@ export async function POST(request: Request) {
     if (!ownedCourse) {
       return NextResponse.json({ error: 'Course not found' }, { status: 404 })
     }
+  }
+
+  // Per-user storage ceiling (protects the shared free-tier project).
+  const incomingBytes = file ? file.size : Buffer.byteLength(textContent ?? '', 'utf8')
+  if (await wouldExceedStorageLimit(user.id, incomingBytes)) {
+    return NextResponse.json({ error: 'Storage limit reached. Delete some materials to free up space.' }, { status: 413 })
   }
 
   let filename: string

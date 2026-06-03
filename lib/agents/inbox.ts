@@ -246,7 +246,13 @@ export async function classifyMaterial(
     rawResponse = message.content[0].type === 'text' ? message.content[0].text : ''
   }
 
-  const { isContextHint, courseId, tier, isHomework, dueDate } = parseClassifyResponse(rawResponse)
+  const { isContextHint, courseId: rawCourseId, tier, isHomework, dueDate } = parseClassifyResponse(rawResponse)
+  // Whitelist the model-returned course_id against THIS user's own courses. The
+  // classifier is only shown the user's courses, but a prompt-injected document
+  // could steer it to emit an arbitrary id, and the FK does not enforce same-user.
+  const courseId = rawCourseId && (courses ?? []).some((c: { course_id: string }) => c.course_id === rawCourseId)
+    ? rawCourseId
+    : null
 
   // Auto-dismiss context hints — they're not course materials
   if (isContextHint) {

@@ -45,3 +45,6 @@ Or run these SQL files in the Supabase SQL editor **in this order** for a fresh 
 - `security-hardening.sql` — REVOKEs the SECURITY-DEFINER vault/`review_card_atomic` RPCs from `anon`/`authenticated` (closes a direct-Data-API key-theft + cross-tenant-write hole), adds explicit `WITH CHECK` to the user-scoped RLS policies, and adds `unique(user_id, name)` to professors/courses. Idempotent. Run last. *(Already included at the end of `setup.sql`.)*
 
 > If you operate Cogni as a single shared deployment with open sign-up, section 8 is **mandatory** — without it any signed-up user can decrypt every user's API keys via the public Data API. (Self-host single-user deployments should still run it.)
+
+## 9. Usage limits / abuse guards (hosted multi-tenant)
+- `usage-limits.sql` — per-user daily caps on expensive AI routes (`daily_usage` + `consume_daily_quota`) and a `users.suspended` flag. Idempotent. *(Also included at the end of `setup.sql`.)*
