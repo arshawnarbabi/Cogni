@@ -76,3 +76,11 @@ delete from public.courses a using public.courses b
   where a.user_id = b.user_id and a.name = b.name and a.ctid < b.ctid;
 create unique index if not exists professors_user_name_uniq on public.professors (user_id, name);
 create unique index if not exists courses_user_name_uniq    on public.courses (user_id, name);
+
+-- Tell PostgREST (the Supabase Data API layer the app's upsert-on-conflict goes
+-- through) to reload its schema cache so it recognizes the unique indexes just
+-- created. Without this, supabase-js upsert({ onConflict: 'user_id,name' }) keeps
+-- failing with "no unique constraint matching the ON CONFLICT specification" even
+-- though the index exists — until the cache reloads. Harmless no-op on a plain
+-- Postgres with no PostgREST listening on the channel.
+notify pgrst, 'reload schema';
