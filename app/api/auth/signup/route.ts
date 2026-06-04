@@ -134,17 +134,13 @@ export async function POST(request: Request) {
     return apiError('email_exists', 409)
   }
   if (user) {
-    // Persist consent into the durable audit columns immediately.
-    await service.from('users').upsert(
-      {
-        user_id: user.id,
-        tos_version: LEGAL_VERSION,
-        tos_accepted_at: new Date().toISOString(),
-        privacy_version: LEGAL_VERSION,
-        age_attested_at: new Date().toISOString(),
-      },
-      { onConflict: 'user_id' },
-    )
+    // Consent is captured durably at signup in two places already: the auth
+    // user_metadata (tos_version/privacy_version/age_attested, set in the signUp
+    // options above) and the audit_log event below. It is mirrored into the
+    // users.* columns later, in onboarding/complete — the public.users row does not
+    // exist yet here (it's created at onboarding; app/page.tsx gates onboarding on
+    // that row's existence, so we must NOT create it early), and display_name is
+    // NOT NULL, so an upsert here would silently fail anyway.
     await auditLog('signup', { subjectUserId: user.id, detail: { mode: cfg.signupMode, email } })
   }
 

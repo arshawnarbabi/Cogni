@@ -20,8 +20,18 @@ This is the ordered list of the **manual steps only you can do** (accounts, dash
 ## 1. Supabase project
 1. Create the **production Supabase project** (region is immutable — pick closest to your users; you're at the 2-project free limit, so free a slot).
 2. **Enable the `supabase_vault` extension** (Database → Extensions) **before** running SQL — BYOK breaks without it. *(On newer projects Vault is often already enabled by default — just verify it's on.)*
-3. Run **`supabase/setup.sql`** once in the SQL editor (it bundles sections 1–10, idempotent).
-4. **Verify:** RLS `on` for every table; the 4 storage buckets exist; the Vault / `review_card_atomic` RPCs are **not** granted to `anon`.
+3. Run **`supabase/setup.sql`** once in the SQL editor (it bundles sections 1–10, idempotent). It auto-raises `maintenance_work_mem` for the pgvector index build so it completes on the free tier. *(⚠️ An outdated copy will abort at that index with `ERROR: 54000: memory required is N MB, maintenance_work_mem is 32 MB` and silently leave every later object uncreated — a partial schema that 500s onboarding/key-save later. If you see that error, you're on an old `setup.sql`: pull latest and re-run.)*
+4. **Reusing an existing project?** `setup.sql` is idempotent and non-destructive — re-running the latest version **heals a partial/aborted prior run**. (Its only deletes are a lossless professor/course de-dupe and the legacy `user_keys`→Vault migration; no table drops.)
+5. **Verify** — paste this in the SQL editor; **every `ok` must be `true`** (it catches the partial-schema failure mode):
+   ```sql
+   select 'idx idx_material_embeddings_embedding' as obj, to_regclass('public.idx_material_embeddings_embedding') is not null as ok
+   union all select 'fn match_material_chunks',  exists(select 1 from pg_proc where proname='match_material_chunks')
+   union all select 'fn store_user_secret',      exists(select 1 from pg_proc where proname='store_user_secret')
+   union all select 'fn enforce_signup_policy',  exists(select 1 from pg_proc where proname='enforce_signup_policy')
+   union all select 'table app_config',          to_regclass('public.app_config') is not null
+   union all select 'col users.tos_accepted_at', exists(select 1 from information_schema.columns where table_name='users' and column_name='tos_accepted_at');
+   ```
+   Then also confirm RLS is `on` for every table; the 4 storage buckets exist; and the Vault / `review_card_atomic` RPCs are **not** granted to `anon`.
 
 ## 2. Email
 
@@ -73,7 +83,7 @@ Set these env vars in Vercel (all optional — each is a no-op if unset):
 ## 7. Pre-launch verification (on prod, not local)
 - Run the test suite against prod config.
 - Re-verify tenant isolation on the **prod** Data API: as `anon`, `POST /rest/v1/rpc/get_user_api_key` must return "permission denied."
-- Fresh-stranger smoke run on the deployed URL: signup → confirm email → onboard → upload → tutor → review → export data → delete account.
+- Fresh-stranger smoke run on the deployed URL: signup → onboard → upload → tutor → review → export data (Settings → "Export my data") → delete account. *(In the no-email pilot there's no confirmation step — signup auto-logs-in. Only expect a "confirm your email" step if you turned email confirmation back on.)*
 - Confirm both crons fire on prod (scheduler 05:00, nudge 06:00 UTC) and the maintenance cron (Sun 04:00).
 - **Soft-launch** to a small invited cohort; watch week 1; then open public signup.
 
@@ -87,7 +97,7 @@ Set these env vars in Vercel (all optional — each is a no-op if unset):
 | **Hard-stop all AI** (cost/abuse spike) | `update app_config set ai_disabled = true;` |
 | **Go invite-only** | `update app_config set signup_mode='invite';` then `insert into invite_codes(code) values ('ABC123');` |
 | **Suspend a user** | `POST /api/operator` with header `x-operator-secret: <OPERATOR_SECRET>`, body `{"userId":"…","suspended":true,"reason":"…"}` |
-| **Reset a user's password** (no-email recovery) | `POST /api/operator` with the same header, body `{"userId":"…","setPassword":"<new-password>"}` — sets it directly via the Admin API and audits it. This is the recovery path when self-serve reset is off. *(You can also do it in Supabase → Authentication → Users.)* |
+| **Reset a user's password** (no-email recovery) | `POST /api/operator` with the same header, body `{"userId":"…","setPassword":"<new-password>"}` (min **8 chars**) — sets it directly via the Admin API and audits it. This is the recovery path when self-serve reset is off. *(You can also do it in Supabase → Authentication → Users.)* |
 | **Review activity** | `GET /api/operator` (recent audit log + suspended users), or read `audit_log` in SQL |
 | **Tune AI caps** | edit `DAILY_LIMITS` in `lib/rate-limit.ts` (redeploy) |
 

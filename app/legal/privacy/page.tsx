@@ -30,9 +30,6 @@ export default function PrivacyPage() {
 
       <h2>4. AI providers &amp; data retention</h2>
       <p>When you use AI features, the relevant materials and prompts are sent to Anthropic and/or OpenAI under your own API key. By default, these providers may retain API inputs and outputs for a limited period for abuse-monitoring purposes and do not use API data submitted under standard commercial terms to train their models. Retention and training behavior is governed by your agreement with each provider and the settings on your provider account.</p>
-      <p className="rounded-md border border-amber-500/40 bg-amber-500/5 p-3 text-xs">
-        <strong>Operator note (remove before launch):</strong> confirm each provider&rsquo;s current data-retention / zero-data-retention and training posture for the API tier you direct users to, and update this section to state it precisely. This sentence should not appear on the live site.
-      </p>
 
       <h2>5. Storage &amp; security</h2>
       <p>Data is stored with our hosting and database providers (Supabase, Vercel). Access is isolated per user at the database level (row-level security), and your API keys are kept in an encrypted vault separate from ordinary application data.</p>

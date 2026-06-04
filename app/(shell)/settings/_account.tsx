@@ -2,7 +2,7 @@
 
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { SignOut, Trash, Warning, ArrowCounterClockwise } from '@phosphor-icons/react'
+import { SignOut, Trash, Warning, ArrowCounterClockwise, DownloadSimple } from '@phosphor-icons/react'
 import { createClient } from '@/lib/supabase/client'
 
 export function AccountSection() {
@@ -14,6 +14,8 @@ export function AccountSection() {
   const [resetState, setResetState] = useState<'idle' | 'confirming'>('idle')
   const [resetText, setResetText] = useState('')
   const [isResetting, setIsResetting] = useState(false)
+  const [exporting, setExporting] = useState(false)
+  const [actionError, setActionError] = useState('')
 
   async function signOut() {
     setSigningOut(true)
@@ -22,17 +24,51 @@ export function AccountSection() {
     router.push('/auth')
   }
 
+  async function exportData() {
+    setActionError('')
+    setExporting(true)
+    try {
+      const res = await fetch('/api/user/export')
+      if (!res.ok) throw new Error('export failed')
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `cogni-export-${new Date().toISOString().slice(0, 10)}.json`
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(url)
+    } catch {
+      setActionError('Could not export your data. Please try again.')
+    } finally {
+      setExporting(false)
+    }
+  }
+
   async function deleteAccount() {
     if (confirmText !== 'DELETE') return
+    setActionError('')
     setIsDeleting(true)
-    await fetch('/api/settings/account', { method: 'DELETE' })
+    const res = await fetch('/api/settings/account', { method: 'DELETE' })
+    if (!res.ok) {
+      setIsDeleting(false)
+      setActionError('Account deletion failed — your data was not deleted. Please try again or contact support.')
+      return
+    }
     router.push('/auth')
   }
 
   async function resetAccount() {
     if (resetText !== 'RESET') return
+    setActionError('')
     setIsResetting(true)
-    await fetch('/api/settings/reset', { method: 'POST' })
+    const res = await fetch('/api/settings/reset', { method: 'POST' })
+    if (!res.ok) {
+      setIsResetting(false)
+      setActionError('Reset failed — your content was not changed. Please try again.')
+      return
+    }
     router.push('/onboarding')
   }
 
@@ -46,6 +82,19 @@ export function AccountSection() {
         <SignOut size={15} />
         {signingOut ? 'Signing out…' : 'Sign out'}
       </button>
+
+      <button
+        onClick={exportData}
+        disabled={exporting}
+        className="flex w-fit items-center gap-2 rounded-xl border border-border px-4 py-2.5 text-sm text-muted-foreground hover:bg-muted/40 hover:text-foreground transition-colors disabled:opacity-40"
+      >
+        <DownloadSimple size={15} />
+        {exporting ? 'Exporting…' : 'Export my data'}
+      </button>
+
+      {actionError && (
+        <p className="text-sm text-red-600 dark:text-red-400">{actionError}</p>
+      )}
 
       {resetState === 'idle' && (
         <button

@@ -5,6 +5,7 @@ import { requireOwnedProfessor } from '@/lib/authz'
 import { isUserSuspended, consumeAiQuota } from '@/lib/rate-limit'
 import { isValidTimeZone } from '@/lib/time'
 import { serverError } from '@/lib/api-error'
+import { LEGAL_VERSION } from '@/lib/legal'
 import { NextResponse } from 'next/server'
 
 type CourseInput = {
@@ -52,12 +53,23 @@ export async function POST(request: Request) {
   const safeName = (typeof displayName === 'string' ? displayName.trim() : '') || 'Student'
   const safeTimezone = isValidTimeZone(timezone) ? timezone : 'UTC'
 
+  // Mirror the consent given at signup into the durable users.* columns. These can
+  // only be written once this row exists — and the row is created HERE, not at signup
+  // (app/page.tsx gates onboarding on row existence, and users.display_name is NOT
+  // NULL), so signup persists consent only to auth user_metadata + audit_log. We copy
+  // the accepted versions from metadata and stamp the accepted-at as the signup time.
+  const meta = (user.user_metadata ?? {}) as Record<string, unknown>
+  const acceptedAt = user.created_at ?? new Date().toISOString()
   const { error: userError } = await service.from('users').upsert(
     {
       user_id: user.id,
       display_name: safeName,
       session_length_preference: sessionLength,
       timezone: safeTimezone,
+      tos_version: typeof meta.tos_version === 'string' ? meta.tos_version : LEGAL_VERSION,
+      tos_accepted_at: acceptedAt,
+      privacy_version: typeof meta.privacy_version === 'string' ? meta.privacy_version : LEGAL_VERSION,
+      age_attested_at: acceptedAt,
     },
     { onConflict: 'user_id' }
   )

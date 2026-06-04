@@ -17,7 +17,10 @@ export async function POST(request: Request) {
   const result = await runFlashcardAgent(user.id, courseId, topicId)
 
   if (result.error && result.generated === 0) {
-    return NextResponse.json({ error: result.error }, { status: 500 })
+    // A missing BYOK key is an expected user state (402, like the tutor route), not a
+    // server fault — don't report it as a 5xx.
+    const status = result.error === 'No API key configured' ? 402 : 500
+    return NextResponse.json({ error: result.error }, { status })
   }
 
   return NextResponse.json({ ok: true, generated: result.generated })
