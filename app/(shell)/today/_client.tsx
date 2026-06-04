@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, Fragment, type ReactNode } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import { motion } from 'framer-motion'
@@ -65,12 +65,14 @@ function FlashcardTaskCard({ task, completed, onComplete, courseIconMap }: {
         <div className="flex flex-1 flex-col gap-0.5 min-w-0">
           <span className="text-sm font-semibold text-foreground truncate">{task.course_name}</span>
           <span className="text-xs text-muted-foreground">
-            {task.card_count > 0 ? `${task.card_count} cards due` : 'Flashcard review'} · ~{task.duration_minutes} min
+            {task.reason ?? (task.card_count > 0 ? `${task.card_count} cards due` : 'Flashcard review')} · ~{task.duration_minutes} min
           </span>
         </div>
-        {completed ? (
+        {completed || task.card_count === 0 ? (
+          // Zero due cards = nothing to review right now; show it done rather than a
+          // dead "No cards yet" sitting in the plan.
           <CheckCircle size={22} className="shrink-0 text-emerald-500" weight="fill" />
-        ) : task.card_count > 0 ? (
+        ) : (
           <button
             onClick={() => {
               router.push(`/review?course=${task.course_id}`)
@@ -80,8 +82,6 @@ function FlashcardTaskCard({ task, completed, onComplete, courseIconMap }: {
           >
             Study <ArrowRight size={13} />
           </button>
-        ) : (
-          <span className="text-xs text-muted-foreground shrink-0">No cards yet</span>
         )}
       </div>
     </motion.div>
@@ -211,7 +211,7 @@ function HomeworkTaskCard({ task, completed, onComplete, courseIconMap }: {
         <div className="flex flex-1 flex-col gap-0.5 min-w-0">
           <span className="text-sm font-semibold text-foreground truncate">{task.title}</span>
           <span className={`text-xs ${task.overdue ? 'text-red-500 font-medium' : 'text-muted-foreground'}`}>
-            {task.overdue ? 'Overdue · ' : 'Due today · '}{task.course_name}
+            {task.reason ?? `${task.overdue ? 'Overdue' : 'Due today'} · ${task.course_name}`}
           </span>
         </div>
         {completed ? (
@@ -452,74 +452,84 @@ export function TodayClient({
         </Link>
       )}
 
-      {/* Flashcard study tasks */}
-      {studyTasks.length > 0 && (
-        <div className="flex flex-col gap-3">
-          <div className="flex items-center gap-2">
-            <GraduationCap size={14} className="text-muted-foreground" weight="fill" />
-            <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Study</h2>
-          </div>
-          <StaggerList className="flex flex-col gap-3">
-            {studyTasks.sort((a, b) => a.order - b.order).map(task => (
-              <StaggerItem key={task.course_id}>
-                <FlashcardTaskCard
-                  task={task}
-                  courseIconMap={courseIconMap}
-                  completed={completed.has(actionableTasks.indexOf(task))}
-                  onComplete={() => markDone(actionableTasks.indexOf(task))}
-                />
-              </StaggerItem>
-            ))}
-          </StaggerList>
-        </div>
-      )}
+      {/* Today's task sections, ordered by their most-urgent item — so an overdue
+          assignment or an exam-imminent quiz leads, instead of always sitting under
+          flashcards. */}
+      {(() => {
+        const maxPrio = (ts: { priority_score?: number }[]) =>
+          ts.reduce((m, t) => Math.max(m, t.priority_score ?? 0), 0)
+        const sections: { key: string; prio: number; node: ReactNode }[] = []
 
-      {/* Quiz tasks */}
-      {quizTasks.length > 0 && (
-        <div className="flex flex-col gap-3">
-          <div className="flex items-center gap-2">
-            <ClipboardText size={14} className="text-muted-foreground" weight="fill" />
-            <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Practice</h2>
-          </div>
-          <StaggerList className="flex flex-col gap-3">
-            {quizTasks.sort((a, b) => a.order - b.order).map((task, i) => (
-              <StaggerItem key={task.course_id + i}>
-                <QuizTaskCard
-                  task={task}
-                  courseIconMap={courseIconMap}
-                  completed={completed.has(actionableTasks.indexOf(task))}
-                  onComplete={() => markDone(actionableTasks.indexOf(task))}
-                />
-              </StaggerItem>
-            ))}
-          </StaggerList>
-        </div>
-      )}
-
-      {/* Homework tasks */}
-      {hwTasks.length > 0 && (
-        <div className="flex flex-col gap-3">
-          <div className="flex items-center gap-2">
-            <ClockCountdown size={14} className="text-muted-foreground" weight="fill" />
-            <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Homework</h2>
-          </div>
-          <StaggerList className="flex flex-col gap-3">
-            {hwTasks.sort((a, b) => a.order - b.order).map(task => {
-              const idx = actionableTasks.indexOf(task)
-              return (
-                <StaggerItem key={task.assignment_id}>
-                  <HomeworkTaskCard
+        if (studyTasks.length > 0) sections.push({ key: 'study', prio: maxPrio(studyTasks), node: (
+          <div className="flex flex-col gap-3">
+            <div className="flex items-center gap-2">
+              <GraduationCap size={14} className="text-muted-foreground" weight="fill" />
+              <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Study</h2>
+            </div>
+            <StaggerList className="flex flex-col gap-3">
+              {studyTasks.sort((a, b) => a.order - b.order).map(task => (
+                <StaggerItem key={task.course_id}>
+                  <FlashcardTaskCard
                     task={task}
                     courseIconMap={courseIconMap}
-                    completed={isTaskCompleted(task, idx)}
-                    onComplete={() => markDone(idx, task.assignment_id)}
+                    completed={completed.has(actionableTasks.indexOf(task))}
+                    onComplete={() => markDone(actionableTasks.indexOf(task))}
                   />
                 </StaggerItem>
-              )
-            })}
-          </StaggerList>
-        </div>
-      )}
+              ))}
+            </StaggerList>
+          </div>
+        ) })
+
+        if (quizTasks.length > 0) sections.push({ key: 'practice', prio: maxPrio(quizTasks), node: (
+          <div className="flex flex-col gap-3">
+            <div className="flex items-center gap-2">
+              <ClipboardText size={14} className="text-muted-foreground" weight="fill" />
+              <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Practice</h2>
+            </div>
+            <StaggerList className="flex flex-col gap-3">
+              {quizTasks.sort((a, b) => a.order - b.order).map((task, i) => (
+                <StaggerItem key={task.course_id + i}>
+                  <QuizTaskCard
+                    task={task}
+                    courseIconMap={courseIconMap}
+                    completed={completed.has(actionableTasks.indexOf(task))}
+                    onComplete={() => markDone(actionableTasks.indexOf(task))}
+                  />
+                </StaggerItem>
+              ))}
+            </StaggerList>
+          </div>
+        ) })
+
+        if (hwTasks.length > 0) sections.push({ key: 'homework', prio: maxPrio(hwTasks), node: (
+          <div className="flex flex-col gap-3">
+            <div className="flex items-center gap-2">
+              <ClockCountdown size={14} className="text-muted-foreground" weight="fill" />
+              <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Homework</h2>
+            </div>
+            <StaggerList className="flex flex-col gap-3">
+              {hwTasks.sort((a, b) => a.order - b.order).map(task => {
+                const idx = actionableTasks.indexOf(task)
+                return (
+                  <StaggerItem key={task.assignment_id}>
+                    <HomeworkTaskCard
+                      task={task}
+                      courseIconMap={courseIconMap}
+                      completed={isTaskCompleted(task, idx)}
+                      onComplete={() => markDone(idx, task.assignment_id)}
+                    />
+                  </StaggerItem>
+                )
+              })}
+            </StaggerList>
+          </div>
+        ) })
+
+        return sections
+          .sort((a, b) => b.prio - a.prio)
+          .map(s => <Fragment key={s.key}>{s.node}</Fragment>)
+      })()}
 
       {/* Weekly schedule */}
       <WeeklySchedule schedule={upcomingSchedule} />

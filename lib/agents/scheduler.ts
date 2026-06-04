@@ -12,6 +12,7 @@ export type TaskItem =
       card_count: number
       duration_minutes: number
       priority_score: number
+      reason?: string
       order: number
     }
   | {
@@ -22,6 +23,8 @@ export type TaskItem =
       title: string
       due_date: string
       overdue: boolean
+      priority_score?: number
+      reason?: string
       order: number
       completion_status?: 'pending' | 'complete' | 'late'
     }
@@ -30,6 +33,7 @@ export type TaskItem =
       course_id: string
       course_name: string
       reason: string
+      priority_score?: number
       order: number
     }
   | {
@@ -45,6 +49,20 @@ function examProximityMultiplier(daysToExam: number | null): number {
   if (daysToExam > 3) return 3
   return 5
 }
+
+// 0–45 urgency bonus from exam proximity, on the same 0–100 scale the UNIFIED task
+// ordering uses — so an exam-imminent review/quiz can out-rank routine work across
+// task types (not just within its own type).
+function examUrgencyBonus(daysToExam: number | null): number {
+  if (daysToExam === null) return 0
+  if (daysToExam <= 3) return 45
+  if (daysToExam <= 7) return 30
+  if (daysToExam <= 14) return 18
+  if (daysToExam <= 30) return 8
+  return 0
+}
+
+const clamp = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, n))
 
 function buildInsight(params: {
   courses: { name: string }[]
@@ -241,6 +259,16 @@ export async function runScheduler(userId: string): Promise<void> {
         const cappedShare = Math.min(0.7, Math.max(share, reviewable.length === 1 ? 1 : 0.1))
         const duration = Math.round(sessionMinutes * cappedShare)
         if (duration < 5) return
+        const daysToExam = nextExamByCourse[course.course_id] ?? null
+        // Unified 0–100 urgency: mastery gap + exam proximity (comparable across task types).
+        const urgency = clamp(20 + examUrgencyBonus(daysToExam) + (1 - course.avg_mastery) * 25, 0, 95)
+        // One-line "why": cards due + the single strongest reason.
+        let why = `${course.card_count} card${course.card_count === 1 ? '' : 's'} due`
+        if (daysToExam !== null && daysToExam <= 14) {
+          why += ` · exam in ${daysToExam} day${daysToExam === 1 ? '' : 's'}`
+        } else if (course.weakest_topic && course.weakest_topic.mastery > 0 && course.weakest_topic.mastery < 0.5) {
+          why += ` · focus ${course.weakest_topic.name}`
+        }
         tasks.push({
           type: 'flashcard_review',
           course_id: course.course_id,
@@ -248,7 +276,8 @@ export async function runScheduler(userId: string): Promise<void> {
           topic_ids: course.topic_ids,
           card_count: course.card_count,
           duration_minutes: duration,
-          priority_score: Math.round(course.priority * 100) / 100,
+          priority_score: Math.round(urgency),
+          reason: why,
           order: i + 1,
         })
       })
@@ -312,7 +341,9 @@ export async function runScheduler(userId: string): Promise<void> {
         course_id: course.course_id,
         course_name: course.name,
         reason,
-        priority: daysToExam !== null ? (30 - daysToExam) : avgMastery * 10,
+        // Unified 0–100 urgency: an exam-imminent quiz ranks high; a routine
+        // "you're ready to test" quiz stays low (below active review work).
+        priority: examSoon ? clamp(40 + examUrgencyBonus(daysToExam), 40, 88) : 22,
       })
     }
   }
@@ -327,6 +358,7 @@ export async function runScheduler(userId: string): Promise<void> {
         course_id: c.course_id,
         course_name: c.course_name,
         reason: c.reason,
+        priority_score: Math.round(c.priority),
         order: tasks.length + i + 1,
       })
     })
@@ -347,19 +379,36 @@ export async function runScheduler(userId: string): Promise<void> {
 
   let hwOrder = tasks.length + 1
   for (const a of assignments ?? []) {
+    const isOverdue = a.due_date < today
+    const daysOverdue = isOverdue ? daysBetweenDateKeys(a.due_date, today) : 0
+    // Unified 0–100 urgency: due-today is high; overdue climbs with how late it is.
+    const urgency = isOverdue ? clamp(64 + daysOverdue * 3, 64, 92) : 58
+    const courseLabel = courseNameMap[a.course_id] ?? ''
+    const reason = isOverdue
+      ? `Overdue${daysOverdue > 0 ? ` by ${daysOverdue} day${daysOverdue === 1 ? '' : 's'}` : ''}${courseLabel ? ` · ${courseLabel}` : ''}`
+      : `Due today${courseLabel ? ` · ${courseLabel}` : ''}`
     tasks.push({
       type: 'homework',
       course_id: a.course_id,
-      course_name: courseNameMap[a.course_id] ?? '',
+      course_name: courseLabel,
       assignment_id: a.assignment_id,
       title: prettifyTitle(a.name),
       due_date: a.due_date,
-      overdue: a.due_date < today,
+      overdue: isOverdue,
+      priority_score: Math.round(urgency),
+      reason,
       order: hwOrder++,
     })
   }
 
   if (tasks.length === 0) return
+
+  // Unified ordering: sort ALL task types by their shared 0–100 urgency so an
+  // exam-tomorrow quiz or an overdue assignment can sit at the very top, instead of
+  // being permanently buried beneath flashcard reviews. Then renumber order.
+  const taskUrgency = (t: TaskItem) => ('priority_score' in t ? t.priority_score ?? 0 : 0)
+  tasks.sort((a, b) => taskUrgency(b) - taskUrgency(a))
+  tasks.forEach((t, i) => { t.order = i + 1 })
 
   // Build insight
   const nextExamEntry = Object.entries(nextExamByCourse).sort((a, b) => a[1] - b[1])[0]
