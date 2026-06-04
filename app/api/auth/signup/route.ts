@@ -111,8 +111,7 @@ export async function POST(request: Request) {
     // gating trigger surfaces its reason string in the error message.
     const msg = error.message.toLowerCase()
     if (msg.includes('already') || msg.includes('registered')) {
-      // Anti-enumeration: respond as if it succeeded.
-      return NextResponse.json({ ok: true, confirmEmail: true })
+      return apiError('email_exists', 409)
     }
     if (msg.includes('signups_paused')) return apiError('signups_paused', 403)
     if (msg.includes('email_not_allowed')) return apiError('email_not_allowed', 403)
@@ -126,10 +125,15 @@ export async function POST(request: Request) {
   }
 
   // Supabase returns a user with an empty identities array when the email is
-  // already registered (with confirmations on). Treat as anti-enumeration success.
+  // already registered. Tell the user clearly so they sign in instead of waiting
+  // on a confirmation that never comes. (Trades anti-enumeration for clarity —
+  // acceptable for this app's threat model.)
   const user = data.user
   const alreadyRegistered = !!user && Array.isArray(user.identities) && user.identities.length === 0
-  if (user && !alreadyRegistered) {
+  if (alreadyRegistered) {
+    return apiError('email_exists', 409)
+  }
+  if (user) {
     // Persist consent into the durable audit columns immediately.
     await service.from('users').upsert(
       {

@@ -24,6 +24,7 @@ const SIGNUP_ERRORS: Record<string, string> = {
   email_not_allowed: 'Sign-ups are limited to approved email domains right now.',
   invite_required: 'An invite code is required to sign up.',
   invalid_invite: 'That invite code is invalid or already used.',
+  email_exists: 'An account with this email already exists — please sign in.',
   signup_failed: 'Could not create your account. Please try again.',
 }
 
@@ -87,6 +88,12 @@ export default function AuthPage() {
     })
     const data = await res.json().catch(() => ({}))
     if (!res.ok) {
+      if (data?.error === 'email_exists') {
+        // Clear message + drop them on the sign-in form (email stays filled).
+        toast.error(SIGNUP_ERRORS.email_exists)
+        setMode('signin')
+        return
+      }
       toast.error(SIGNUP_ERRORS[data?.error] ?? 'Could not create your account.')
       return
     }
