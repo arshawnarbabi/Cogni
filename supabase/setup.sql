@@ -368,7 +368,14 @@ create index if not exists idx_assignments_user_due on public.assignments(user_i
 create index if not exists idx_nudges_user_status on public.nudges(user_id, status);
 create index if not exists idx_session_log_user_course on public.session_log(user_id, course_id);
 create index if not exists idx_mastery_history_user_topic_recorded on public.mastery_history(user_id, topic_id, recorded_at);
+-- The ivfflat index build needs more working memory than the Supabase free tier's
+-- default maintenance_work_mem (32MB). Raise it just for this build, then restore.
+-- Without this, free-tier setup aborts here with:
+--   ERROR: 54000: memory required is N MB, maintenance_work_mem is 32 MB
+-- and every object defined later in this script is silently left uncreated.
+set maintenance_work_mem = '128MB';
 create index if not exists idx_material_embeddings_embedding on public.material_embeddings using ivfflat (embedding vector_cosine_ops);
+reset maintenance_work_mem;
 
 
 -- ======================================================================
