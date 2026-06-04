@@ -1069,9 +1069,17 @@ alter policy "calendar_connections: own rows only" on public.calendar_connection
 -- TOCTOU), and courses/create inserts a professor unconditionally (duplicates
 -- on every course-create). These unique indexes make the dedup race-safe and
 -- let the routes use upsert-on-conflict.
--- NOTE: if applied to a DB that already has duplicate (user_id,name) rows, the
--- index creation will fail — de-dupe first. On a fresh hosted DB there is no
--- existing data, so it creates cleanly.
+-- A unique index can't be created while duplicate (user_id, name) rows exist —
+-- which a project predating this constraint may have. So de-dupe first (keep one
+-- row per group). Duplicates are already invalid under the app's model (it
+-- upserts on user_id+name), so this is a correct reconciliation, not data loss.
+-- Without this, the index silently fails to create on a reused DB and the
+-- onboarding/course-create upserts then 500 with "no unique constraint matching
+-- the ON CONFLICT specification."
+delete from public.professors a using public.professors b
+  where a.user_id = b.user_id and a.name = b.name and a.ctid < b.ctid;
+delete from public.courses a using public.courses b
+  where a.user_id = b.user_id and a.name = b.name and a.ctid < b.ctid;
 create unique index if not exists professors_user_name_uniq on public.professors (user_id, name);
 create unique index if not exists courses_user_name_uniq    on public.courses (user_id, name);
 

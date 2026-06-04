@@ -156,7 +156,13 @@ export async function POST(request: Request) {
     }
   }
 
-  await initWiki(user.id)
+  // Best-effort: a wiki/storage hiccup must NOT block account creation — the wiki
+  // files are recreated lazily on first tutor/profiler use anyway.
+  try {
+    await initWiki(user.id)
+  } catch (e) {
+    console.error('[onboarding.complete] initWiki failed (non-fatal)', e)
+  }
 
   // Run profiler for each syllabus (extracts topics + updates wiki).
   // Cap the syllabus-analysis AI work per user/day (abuse + free-tier infra guard,
