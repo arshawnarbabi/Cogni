@@ -363,16 +363,21 @@ export async function runScheduler(userId: string): Promise<void> {
       })
     })
 
-  // Homework blocks — due today or overdue, not yet completed
+  // Homework blocks — due today or recently overdue, not yet completed. Bound the
+  // overdue window to the last 14 days and cap the count so an old/backlogged account
+  // (or a batch of past-due uploads) can't bury Today under a wall of red "Overdue".
   const tomorrowStr = addDaysToDateKey(today, 1)
+  const overdueFloor = addDaysToDateKey(today, -14)
 
   const { data: assignments } = await service
     .from('assignments')
     .select('assignment_id, name, due_date, course_id')
     .eq('user_id', userId)
     .eq('completion_status', 'pending')
+    .gte('due_date', overdueFloor)
     .lt('due_date', tomorrowStr)
-    .order('due_date', { ascending: true })
+    .order('due_date', { ascending: false })
+    .limit(8)
 
   const courseNameMap: Record<string, string> = {}
   for (const c of courses) courseNameMap[c.course_id] = c.name

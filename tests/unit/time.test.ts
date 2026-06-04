@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   dateKeyInTimeZone,
   addDaysToDateKey,
+  daysBetweenDateKeys,
   isValidTimeZone,
   zonedWallTimeToUtc,
   startOfLocalDayUtc,
@@ -30,6 +31,25 @@ describe('addDaysToDateKey', () => {
     expect(addDaysToDateKey('2026-03-01', -1)).toBe('2026-02-28')
     expect(addDaysToDateKey('2026-06-15', 6)).toBe('2026-06-21')
     expect(addDaysToDateKey('2026-06-15', 0)).toBe('2026-06-15')
+  })
+})
+
+describe('daysBetweenDateKeys', () => {
+  it('counts whole calendar days regardless of input format or order', () => {
+    expect(daysBetweenDateKeys('2026-06-04', '2026-06-06')).toBe(2)
+    expect(daysBetweenDateKeys('2026-06-06', '2026-06-04')).toBe(-2)
+    expect(daysBetweenDateKeys('2026-06-15', '2026-06-15')).toBe(0)
+    // month/year boundaries
+    expect(daysBetweenDateKeys('2026-12-31', '2027-01-01')).toBe(1)
+    // accepts a full ISO timestamp (uses the date portion only)
+    expect(daysBetweenDateKeys('2026-06-04', '2026-06-11T00:00:00+00:00')).toBe(7)
+  })
+  it('is pure calendar arithmetic — no off-by-one for an exam "tomorrow"', () => {
+    // Whatever the wall-clock instant, the day count between two local date keys is
+    // stable (the bug we replaced used Date.now() ms math and could read 2 as 1).
+    const today = dateKeyInTimeZone(new Date('2026-06-15T14:30:00Z'), 'Asia/Tokyo')
+    const examTomorrow = addDaysToDateKey(today, 1)
+    expect(daysBetweenDateKeys(today, examTomorrow)).toBe(1)
   })
 })
 

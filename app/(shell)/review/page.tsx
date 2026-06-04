@@ -35,11 +35,44 @@ export default async function ReviewPage({ searchParams }: { searchParams: Searc
     query = query.eq('course_id', courseId)
   }
 
-  const { data: cards } = await query.limit(50)
+  // Pull a bit more than a session's worth, then order by topic importance below.
+  const { data: cards } = await query.limit(80)
 
   if (!cards || cards.length === 0) {
     redirect(courseId ? '/courses' : '/today')
   }
 
-  return <ReviewClient cards={cards} />
+  type ReviewCardRow = { card_id: string; front: string; back: string; hint: string | null; topic_id: string | null }
+  const cardRows = cards as ReviewCardRow[]
+
+  // Front-load the session by priority — high professor_weight × low mastery first —
+  // so if the student only finishes part of it, they've covered the highest-leverage
+  // material. Ties fall back to the due-date order from the query.
+  const topicIds = [...new Set(cardRows.map(c => c.topic_id).filter(Boolean) as string[])]
+  const weightByTopic = new Map<string, number>()
+  const masteryByTopic = new Map<string, number>()
+  if (topicIds.length > 0) {
+    const [tw, tm] = await Promise.all([
+      service.from('topics').select('topic_id, professor_weight').in('topic_id', topicIds),
+      service.from('topic_mastery').select('topic_id, mastery_score').eq('user_id', user.id).in('topic_id', topicIds),
+    ])
+    for (const t of (tw.data ?? []) as { topic_id: string; professor_weight: number | null }[]) {
+      weightByTopic.set(t.topic_id, Number(t.professor_weight ?? 0.5))
+    }
+    for (const m of (tm.data ?? []) as { topic_id: string; mastery_score: number | null }[]) {
+      masteryByTopic.set(m.topic_id, Number(m.mastery_score ?? 0))
+    }
+  }
+  const cardPriority = (c: ReviewCardRow): number => {
+    const w = c.topic_id ? (weightByTopic.get(c.topic_id) ?? 0.5) : 0.4
+    const ms = c.topic_id ? (masteryByTopic.get(c.topic_id) ?? 0) : 0
+    return w * (1 - ms)
+  }
+  const ordered = cardRows
+    .map((c, i) => ({ c, i, p: cardPriority(c) }))
+    .sort((a, b) => b.p - a.p || a.i - b.i)
+    .slice(0, 50)
+    .map(x => x.c)
+
+  return <ReviewClient cards={ordered} />
 }
