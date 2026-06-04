@@ -403,7 +403,7 @@ export async function POST(request: Request) {
 
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const streamParams: any = {
-            model: deepThink ? 'claude-opus-4-7' : 'claude-sonnet-4-6',
+            model: deepThink ? 'claude-opus-4-8' : 'claude-sonnet-4-6',
             max_tokens: deepThink ? 16000 : 4096,
             system: systemPrompt,
             tools,
@@ -411,7 +411,7 @@ export async function POST(request: Request) {
           }
 
           if (deepThink) {
-            // Opus 4.7 rejects thinking.type=enabled; uses adaptive + effort instead.
+            // Opus 4.8 rejects thinking.type=enabled; uses adaptive + effort instead.
             streamParams.thinking = { type: 'adaptive' }
             streamParams.output_config = { effort: 'high' }
           }
@@ -628,11 +628,11 @@ export async function POST(request: Request) {
 
         if (!fullText.trim()) {
           console.error('[tutor] empty response', {
-            model: deepThink ? 'claude-opus-4-7' : 'claude-sonnet-4-6',
+            model: deepThink ? 'claude-opus-4-8' : 'claude-sonnet-4-6',
             deepThink,
             iterations,
           })
-          controller.enqueue(emit({ t: 'error', c: `Empty response from model (${deepThink ? 'Opus 4.7' : 'Sonnet 4.6'}). Check server logs.` }))
+          controller.enqueue(emit({ t: 'error', c: `Empty response from model (${deepThink ? 'Opus 4.8' : 'Sonnet 4.6'}). Check server logs.` }))
         }
 
         // Persist the assistant turn BEFORE closing the stream, and never let a
