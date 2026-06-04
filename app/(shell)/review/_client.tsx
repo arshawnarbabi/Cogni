@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import { motion, AnimatePresence } from 'framer-motion'
 import { toast } from 'sonner'
@@ -23,6 +23,27 @@ const RATINGS = [
 function FlipCard({ card, onRate }: { card: Card; onRate: (r: 1|2|3|4) => void }) {
   const [flipped, setFlipped] = useState(false)
   const [rating, setRating] = useState<number | null>(null)
+
+  // Keyboard shortcuts: Space/Enter reveals the answer; 1–4 rate once revealed.
+  // (These keys were advertised on the buttons but never wired up.)
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.repeat) return
+      if (!flipped) {
+        if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); setFlipped(true) }
+        return
+      }
+      if (rating !== null) return
+      if (e.key >= '1' && e.key <= '4') {
+        e.preventDefault()
+        handleRate(Number(e.key) as 1 | 2 | 3 | 4)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+    // handleRate + card are stable for a mounted card; re-bind only on flip/rating.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [flipped, rating])
 
   async function handleRate(r: 1|2|3|4) {
     setRating(r)

@@ -1,5 +1,5 @@
 import { createServiceClient } from '@/lib/supabase/server'
-import { addDaysToDateKey, dateKeyInTimeZone } from '@/lib/time'
+import { addDaysToDateKey, dateKeyInTimeZone, daysBetweenDateKeys } from '@/lib/time'
 
 export type ActiveNudge = {
   nudge_id: string
@@ -13,8 +13,8 @@ function dedupKey(type: string, course_id: string | null): string {
   return `${type}:${course_id ?? ''}`
 }
 
-function daysUntil(dateStr: string): number {
-  return Math.ceil((new Date(dateStr).getTime() - Date.now()) / 86400000)
+function daysUntil(today: string, dateStr: string): number {
+  return daysBetweenDateKeys(today, dateStr)
 }
 
 export async function runNudgeChecks(userId: string): Promise<void> {
@@ -98,7 +98,7 @@ export async function runNudgeChecks(userId: string): Promise<void> {
   // Per-course material checks
   for (const course of courses) {
     const examDate = nextExamDateByCourse[course.course_id]
-    const daysToExam = examDate ? daysUntil(examDate) : null
+    const daysToExam = examDate ? daysUntil(today, examDate) : null
     const hasT1 = hasTier1.has(course.course_id)
     const hasT2 = hasTier2Plus.has(course.course_id)
 

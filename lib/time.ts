@@ -25,6 +25,21 @@ export function addDaysToDateKey(dateKey: string, days: number): string {
   return date.toISOString().split('T')[0]
 }
 
+/**
+ * Whole calendar days from `fromKey` to `toKey`. Accepts a bare date key
+ * (YYYY-MM-DD) or any ISO string (the date portion is used). Pure calendar
+ * arithmetic — unlike `(new Date(date).getTime() - Date.now())/86400000`, it can't
+ * produce an off-by-one near local midnight, so "exam in N days" is always honest.
+ * Negative when `toKey` is earlier than `fromKey`.
+ */
+export function daysBetweenDateKeys(fromKey: string, toKey: string): number {
+  const toUtc = (k: string) => {
+    const [y, m, d] = k.slice(0, 10).split('-').map(Number)
+    return Date.UTC(y, m - 1, d)
+  }
+  return Math.round((toUtc(toKey) - toUtc(fromKey)) / 86400000)
+}
+
 /** True if `tz` is a valid IANA timezone string usable by Intl. */
 export function isValidTimeZone(tz: unknown): tz is string {
   if (typeof tz !== 'string' || tz.length === 0) return false

@@ -18,11 +18,18 @@ type ExtractedExam = {
   topics: string[]         // topic names covered (matched against extracted topics)
 }
 
+type ExtractedAssignment = {
+  name: string             // human-readable assignment name, e.g. "Problem Set 3"
+  due_date: string         // ISO date string YYYY-MM-DD
+  topics: string[]         // topic names this assignment covers (best-effort)
+}
+
 async function extractTopicsAndExams(
   client: Anthropic,
   courseName: string,
-  syllabusText: string
-): Promise<{ topics: ExtractedTopic[]; exams: ExtractedExam[] }> {
+  syllabusText: string,
+  existingTopicNames: string[] = []
+): Promise<{ topics: ExtractedTopic[]; exams: ExtractedExam[]; assignments: ExtractedAssignment[] }> {
   const currentYear = new Date().getFullYear()
 
   const message = await client.messages.create({
@@ -31,7 +38,7 @@ async function extractTopicsAndExams(
     messages: [
       {
         role: 'user',
-        content: `Analyze this syllabus for "${courseName}" and extract topics AND exam dates.
+        content: `Analyze this syllabus for "${courseName}" and extract topics, exam dates, AND assignment/homework due dates.
 
 Return ONLY valid JSON — no other text, no markdown, no code fences.
 
@@ -42,19 +49,29 @@ For topics:
   - Base this on: weeks allocated, exam percentage, explicit "important" markers, assignment frequency
   - 0.9 = major exam topic, covered extensively; 0.5 = average weight; 0.2 = brief mention only
   - Weight total across all topics should average ~0.5
-
+${existingTopicNames.length > 0 ? `
+This course ALREADY tracks these topics:
+${existingTopicNames.map(n => `- ${n}`).join('\n')}
+When a concept you find is the same as one above — even if phrased differently (e.g. "L'Hospital's Rule" is the same as an existing "Linear Approximation and L'Hospital"; "Mean Value Theorem" matches "Mean and Extreme Value Theorems") — REUSE the existing name EXACTLY as written above. Only output a NEW topic name for a genuinely new concept not already covered. Never create a near-duplicate of an existing topic.
+` : ''}
 For exams (midterms, finals, quizzes that count toward the grade):
 - date: ISO format YYYY-MM-DD, assume year ${currentYear} unless a different year is obvious
 - grade_weight: percentage of final grade (e.g. 30 for 30%); 0 if not stated
 - duration_minutes: if stated; default 90 if not mentioned
 - topics: list of topic names (from your extracted topics list) covered by this exam
 
+For assignments (problem sets, homework, projects, papers with a DUE DATE):
+- name: a short human-readable title, e.g. "Problem Set 3" or "Essay 1"
+- due_date: ISO format YYYY-MM-DD, assume year ${currentYear} unless a different year is obvious. ONLY include assignments with a concrete date you can resolve — skip anything like "Week 3" or "TBD".
+- topics: list of topic names (from your extracted topics list) the assignment covers (best-effort; [] if unclear)
+
 Syllabus:
 ${syllabusText.slice(0, 12000)}
 
 Respond with exactly:
 {"topics":[{"name":"...","syllabus_order":1,"professor_weight":0.7},...],
-"exams":[{"date":"2025-10-15","grade_weight":25,"duration_minutes":75,"topics":["Topic A","Topic B"]},...]}`,
+"exams":[{"date":"2025-10-15","grade_weight":25,"duration_minutes":75,"topics":["Topic A","Topic B"]},...],
+"assignments":[{"name":"Problem Set 1","due_date":"2025-09-12","topics":["Topic A"]},...]}`,
       },
     ],
   })
@@ -83,10 +100,21 @@ Respond with exactly:
     const exams: ExtractedExam[] = Array.isArray(parsed.exams)
       ? parsed.exams.filter((e: { date?: string }) => e.date && /^\d{4}-\d{2}-\d{2}$/.test(e.date))
       : []
-    return { topics, exams }
+    const assignments: ExtractedAssignment[] = Array.isArray(parsed.assignments)
+      ? parsed.assignments
+          .filter((a: { name?: string; due_date?: string }) =>
+            typeof a.name === 'string' && a.name.trim().length > 0 &&
+            typeof a.due_date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(a.due_date))
+          .map((a: { name: string; due_date: string; topics?: string[] }) => ({
+            name: a.name.trim(),
+            due_date: a.due_date,
+            topics: Array.isArray(a.topics) ? a.topics : [],
+          }))
+      : []
+    return { topics, exams, assignments }
   } catch (e) {
     console.error('[profiler] JSON parse failed. Raw response was:\n---\n' + raw.slice(0, 500) + '\n---', e)
-    return { topics: [], exams: [] }
+    return { topics: [], exams: [], assignments: [] }
   }
 }
 
@@ -260,26 +288,35 @@ export async function runProfiler(
   }
 
   const client = new Anthropic({ apiKey })
-  let extractedTopics: ExtractedTopic[] = []
-  let extractedExams: ExtractedExam[] = []
 
-  try {
-    const result = await extractTopicsAndExams(client, courseName, syllabusText)
-    extractedTopics = result.topics
-    extractedExams = result.exams
-  } catch (e) {
-    console.error(`${tag} Claude call failed`, e)
-    return
-  }
-
-  // Deduplicate against existing topics
+  // Load already-tracked topics FIRST so the extractor can reuse their canonical
+  // names instead of inventing near-duplicates (the exact-name dedup below missed
+  // "L'Hospital" vs "LHopitals Rule"). The model does the semantic merge — no false
+  // positives the way fuzzy string matching would have.
   const { data: existingTopics } = await service
     .from('topics')
     .select('topic_id, name')
     .eq('course_id', courseId)
     .eq('user_id', userId)
+  const existingTopicNames: string[] = (existingTopics ?? []).map((t: { name: string }) => t.name)
 
-  const existingNames = new Set((existingTopics ?? []).map((t: { name: string }) => t.name.toLowerCase()))
+  let extractedTopics: ExtractedTopic[] = []
+  let extractedExams: ExtractedExam[] = []
+  let extractedAssignments: ExtractedAssignment[] = []
+
+  try {
+    const result = await extractTopicsAndExams(client, courseName, syllabusText, existingTopicNames)
+    extractedTopics = result.topics
+    extractedExams = result.exams
+    extractedAssignments = result.assignments
+  } catch (e) {
+    console.error(`${tag} Claude call failed`, e)
+    return
+  }
+
+  // Dedupe against existing topics (now a safety net — the extractor reuses existing
+  // names, so an exact-name match correctly merges instead of duplicating).
+  const existingNames = new Set(existingTopicNames.map(n => n.toLowerCase()))
   const newTopics = extractedTopics.filter(t => !existingNames.has(t.name.toLowerCase()))
 
   // Update professor_weight on existing topics that match by name — issue in parallel
@@ -374,6 +411,44 @@ export async function runProfiler(
       if (examRowsToInsert.length > 0) {
         const { error: examInsertError } = await service.from('exams').insert(examRowsToInsert)
         if (examInsertError) console.error(`${tag} exam batch insert failed`, examInsertError)
+      }
+    }
+  }
+
+  // Insert extracted assignment/homework due dates. This is what lets a single
+  // syllabus upload populate the WHOLE semester's coursework (not just exams), so
+  // the Today plan knows about recurring homework. Future-dated only (never create a
+  // past-due wall), deduped by name + due_date.
+  if (extractedAssignments.length > 0) {
+    const todayKey = new Date().toISOString().split('T')[0]
+    const futureAssignments = extractedAssignments.filter(a => a.due_date >= todayKey)
+
+    if (futureAssignments.length > 0) {
+      const { data: existingAssignmentRows } = await service
+        .from('assignments')
+        .select('name, due_date')
+        .eq('course_id', courseId)
+        .eq('user_id', userId)
+
+      const existingKeys = new Set(
+        ((existingAssignmentRows ?? []) as { name: string; due_date: string }[])
+          .map(r => `${r.name.toLowerCase()}|${r.due_date.slice(0, 10)}`)
+      )
+
+      const assignmentRowsToInsert = futureAssignments
+        .filter(a => !existingKeys.has(`${a.name.toLowerCase()}|${a.due_date}`))
+        .map(a => ({
+          course_id: courseId,
+          user_id: userId,
+          name: a.name,
+          due_date: a.due_date,
+          type: 'homework',
+          completion_status: 'pending',
+        }))
+
+      if (assignmentRowsToInsert.length > 0) {
+        const { error: assignmentInsertError } = await service.from('assignments').insert(assignmentRowsToInsert)
+        if (assignmentInsertError) console.error(`${tag} assignment batch insert failed`, assignmentInsertError)
       }
     }
   }

@@ -73,6 +73,7 @@ export default async function ProgressPage() {
     { data: flashcardRows },
     { data: gradedExams },
     { data: testResults },
+    { data: reviewedCardRows },
   ] = await Promise.all([
     service
       .from('courses')
@@ -113,7 +114,24 @@ export default async function ProgressPage() {
       .eq('user_id', user.id)
       .order('created_at', { ascending: false })
       .limit(50),
+    // "Started" signal: any card the student has actually reviewed (fsrs_reps > 0).
+    service
+      .from('flashcards')
+      .select('course_id, topic_id')
+      .eq('user_id', user.id)
+      .gt('fsrs_reps', 0),
   ])
+
+  // A course/topic is "started" once the student has reviewed at least one of its
+  // cards. This separates a genuinely-new course (0% because untouched) from a
+  // struggling one (0% because reviewed and failing) — so a fresh upload is framed
+  // as "ready to begin," not "you're failing."
+  const startedCourses = new Set<string>()
+  const startedTopics = new Set<string>()
+  for (const r of (reviewedCardRows ?? []) as { course_id: string; topic_id: string | null }[]) {
+    startedCourses.add(r.course_id)
+    if (r.topic_id) startedTopics.add(r.topic_id)
+  }
 
   // ── Build trend map: courseId → date → mastery[] ───────────────────────────
   const trendMap = new Map<string, Map<string, number[]>>()
@@ -197,7 +215,7 @@ export default async function ProgressPage() {
     const cExams = examsByCourse.get(c.course_id as string) ?? []
     type Prediction =
       | { type: 'prediction'; low: number; high: number; n: number }
-      | { type: 'readiness'; label: 'on_track' | 'needs_more_time' | 'behind' }
+      | { type: 'readiness'; label: 'on_track' | 'needs_more_time' | 'behind' | 'not_started' }
 
     let prediction: Prediction | null = null
 
@@ -224,22 +242,31 @@ export default async function ProgressPage() {
       }
     }
 
-    // Fall back to readiness indicator
+    // Fall back to readiness indicator. A course with no reviews yet is "not_started"
+    // (neutral/encouraging), NOT "behind" — 0% from never studying ≠ 0% from failing.
     if (!prediction) {
-      const label: 'on_track' | 'needs_more_time' | 'behind' =
-        avgMastery >= 0.65 ? 'on_track' : avgMastery >= 0.40 ? 'needs_more_time' : 'behind'
+      const started = startedCourses.has(c.course_id as string)
+      const label: 'on_track' | 'needs_more_time' | 'behind' | 'not_started' =
+        !started ? 'not_started'
+          : avgMastery >= 0.65 ? 'on_track'
+          : avgMastery >= 0.40 ? 'needs_more_time'
+          : 'behind'
       prediction = { type: 'readiness', label }
     }
 
-    // Weak topics (mastery < 0.5, sorted ascending)
+    // Weak topics: only surface topics the student has actually STUDIED and is weak
+    // on (mastery < 0.5). Never flag an untouched topic as a "weak area" — that's
+    // just "not started yet," and labeling it weak is what made a fresh upload look
+    // like failure.
     const weakTopics = topics
       .map((t) => {
         const rows = Array.isArray(t.topic_mastery) ? t.topic_mastery : []
-        return { name: t.name, mastery: rows[0]?.mastery_score != null ? Number(rows[0].mastery_score) : 0 }
+        return { topic_id: t.topic_id, name: t.name, mastery: rows[0]?.mastery_score != null ? Number(rows[0].mastery_score) : 0 }
       })
-      .filter((t: { name: string; mastery: number }) => t.mastery < 0.5)
-      .sort((a: { mastery: number }, b: { mastery: number }) => a.mastery - b.mastery)
-      .slice(0, 5) as { name: string; mastery: number }[]
+      .filter((t) => startedTopics.has(t.topic_id) && t.mastery < 0.5)
+      .sort((a, b) => a.mastery - b.mastery)
+      .slice(0, 5)
+      .map((t) => ({ name: t.name, mastery: t.mastery })) as { name: string; mastery: number }[]
 
     return {
       course_id: c.course_id as string,
@@ -260,7 +287,8 @@ export default async function ProgressPage() {
     for (const t of Array.isArray(c.topics) ? c.topics : []) {
       const rows = Array.isArray(t.topic_mastery) ? t.topic_mastery : []
       const score = rows[0]?.mastery_score != null ? Number(rows[0].mastery_score) : 0
-      if (score < 0.5) {
+      // Only studied-and-weak topics — an untouched topic isn't a "weak area."
+      if (startedTopics.has(t.topic_id) && score < 0.5) {
         allWeakAreas.push({ topic_name: t.name, course_name: c.name, mastery: score })
       }
     }

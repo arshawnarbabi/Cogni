@@ -16,6 +16,7 @@ import {
   CheckCircle,
   Clock,
   ArrowDown,
+  Sparkle,
 } from '@phosphor-icons/react'
 import { StaggerList, StaggerItem } from '@/components/ui/motion'
 import { resolveIcon, resolveColor } from '@/lib/course-icons'
@@ -24,7 +25,7 @@ import { resolveIcon, resolveColor } from '@/lib/course-icons'
 
 type Prediction =
   | { type: 'prediction'; low: number; high: number; n: number }
-  | { type: 'readiness'; label: 'on_track' | 'needs_more_time' | 'behind' }
+  | { type: 'readiness'; label: 'on_track' | 'needs_more_time' | 'behind' | 'not_started' }
 
 type CourseProgress = {
   course_id: string
@@ -166,6 +167,7 @@ function PredictionChip({ prediction }: { prediction: Prediction }) {
     on_track: { icon: <CheckCircle size={13} className="text-emerald-500" weight="fill" />, text: "You're on track", color: 'text-emerald-600 dark:text-emerald-400' },
     needs_more_time: { icon: <Clock size={13} className="text-amber-500" weight="fill" />, text: 'May need more time', color: 'text-amber-600 dark:text-amber-400' },
     behind: { icon: <Warning size={13} className="text-red-500" weight="fill" />, text: 'More study needed', color: 'text-red-600 dark:text-red-400' },
+    not_started: { icon: <Sparkle size={13} className="text-indigo-500" weight="fill" />, text: 'Ready to start', color: 'text-indigo-600 dark:text-indigo-400' },
   }
   const { icon, text, color } = readinessMap[prediction.label]
   return (
@@ -179,6 +181,7 @@ function PredictionChip({ prediction }: { prediction: Prediction }) {
 function CourseCard({ course }: { course: CourseProgress }) {
   const CourseIcon = resolveIcon(course.icon)
   const palette = resolveColor(course.icon_color)
+  const notStarted = course.prediction?.type === 'readiness' && course.prediction.label === 'not_started'
   return (
     <div className="flex w-full flex-col gap-4 rounded-xl border border-border bg-card p-4">
       <div className="flex items-start justify-between gap-2">
@@ -191,7 +194,7 @@ function CourseCard({ course }: { course: CourseProgress }) {
             <span className="text-xs text-muted-foreground">{course.topic_count} topics</span>
           </div>
         </div>
-        <span className={`font-heading text-2xl font-bold tabular-nums shrink-0 ${masteryColor(course.avg_mastery)}`}>
+        <span className={`font-heading text-2xl font-bold tabular-nums shrink-0 ${notStarted ? 'text-muted-foreground' : masteryColor(course.avg_mastery)}`}>
           {Math.round(course.avg_mastery * 100)}%
         </span>
       </div>
@@ -212,7 +215,13 @@ function CourseCard({ course }: { course: CourseProgress }) {
         </div>
       )}
 
-      {course.weak_topics.length > 0 && (
+      {notStarted ? (
+        <div className="border-t border-border/50 pt-3">
+          <p className="text-xs text-muted-foreground">
+            Ready to go — start a study session to begin building mastery across your {course.topic_count} topics.
+          </p>
+        </div>
+      ) : course.weak_topics.length > 0 && (
         <div className="flex flex-col gap-1.5 border-t border-border/50 pt-3">
           <span className="text-[10px] uppercase tracking-wide text-muted-foreground">Weak areas</span>
           {course.weak_topics.slice(0, 3).map(t => (

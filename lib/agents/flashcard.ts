@@ -3,8 +3,47 @@ import { createServiceClient } from '@/lib/supabase/server'
 import { getUserApiKey } from '@/lib/vault'
 import { newCardDefaults } from '@/lib/fsrs'
 import { appendToLog } from '@/lib/wiki'
+import { dateKeyInTimeZone, addDaysToDateKey } from '@/lib/time'
 
 type GeneratedCard = { front: string; back: string; hint?: string }
+
+// How many brand-new cards become due per day. New FSRS cards are due immediately,
+// so without pacing a bulk import dumps every card as "due today" (a wall of 100+
+// cards) — overwhelming and the opposite of helpful. We stagger new cards across
+// upcoming days at this budget, so the student gets a sane daily introduction load.
+const NEW_CARDS_PER_DAY = 15
+
+// Assigns each of `count` new cards a due date, filling upcoming days up to the
+// per-day budget and accounting for new cards already scheduled (across all the
+// user's topics, so the cap is global, not per-topic).
+async function assignNewCardDueDates(
+  service: ReturnType<typeof createServiceClient>,
+  userId: string,
+  count: number,
+  timeZone: string,
+): Promise<string[]> {
+  const today = dateKeyInTimeZone(new Date(), timeZone)
+  const { data: existingNew } = await service
+    .from('flashcards')
+    .select('fsrs_next_review_date')
+    .eq('user_id', userId)
+    .eq('fsrs_state', 'new')
+    .gte('fsrs_next_review_date', today)
+
+  const perDay = new Map<string, number>()
+  for (const c of (existingNew ?? []) as { fsrs_next_review_date: string }[]) {
+    perDay.set(c.fsrs_next_review_date, (perDay.get(c.fsrs_next_review_date) ?? 0) + 1)
+  }
+
+  const dueDates: string[] = []
+  let day = today
+  for (let i = 0; i < count; i++) {
+    while ((perDay.get(day) ?? 0) >= NEW_CARDS_PER_DAY) day = addDaysToDateKey(day, 1)
+    dueDates.push(day)
+    perDay.set(day, (perDay.get(day) ?? 0) + 1)
+  }
+  return dueDates
+}
 
 async function generateCards(
   client: Anthropic,
@@ -112,8 +151,13 @@ export async function runFlashcardAgent(
 
   const defaults = newCardDefaults()
 
+  // Stagger these new cards across upcoming days (global per-day budget) so a bulk
+  // import doesn't surface every card as "due today".
+  const { data: tzRow } = await service.from('users').select('timezone').eq('user_id', userId).single()
+  const dueDates = await assignNewCardDueDates(service, userId, cards.length, tzRow?.timezone ?? 'UTC')
+
   const { error } = await service.from('flashcards').insert(
-    cards.map(card => ({
+    cards.map((card, i) => ({
       user_id: userId,
       course_id: courseId,
       topic_id: topicId,
@@ -121,6 +165,7 @@ export async function runFlashcardAgent(
       back: card.back,
       hint: card.hint ?? null,
       ...defaults,
+      fsrs_next_review_date: dueDates[i],
     }))
   )
 

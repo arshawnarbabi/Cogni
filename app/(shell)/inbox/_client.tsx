@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { toast } from 'sonner'
 import { useDropzone } from 'react-dropzone'
+import { prettifyTitle } from '@/lib/filename'
 import {
   FilePdf,
   FileText,
@@ -293,7 +294,7 @@ export function InboxClient({ items: initialItems, courses }: { items: InboxItem
       res = await fetch('/api/assignments', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ course_id: item.courseId, name: item.name, due_date: date }),
+        body: JSON.stringify({ course_id: item.courseId, name: prettifyTitle(item.name), due_date: date }),
       })
     } catch {
       updateItem(stagedId, { error: 'Could not save the assignment. Check your connection and try again.' })

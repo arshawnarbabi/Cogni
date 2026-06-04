@@ -1,6 +1,7 @@
 import { createServiceClient } from '@/lib/supabase/server'
 import { writeStudyBlocksToCalendar } from '@/lib/calendar'
-import { addDaysToDateKey, dateKeyInTimeZone } from '@/lib/time'
+import { addDaysToDateKey, dateKeyInTimeZone, daysBetweenDateKeys } from '@/lib/time'
+import { prettifyTitle } from '@/lib/filename'
 
 export type TaskItem =
   | {
@@ -51,15 +52,27 @@ function buildInsight(params: {
   weakestTopic: { topicName: string; courseName: string; mastery: number } | null
   totalDueCards: number
   pendingHomework: number
+  hasStarted: boolean
 }): string {
-  const { nextExam, weakestTopic, totalDueCards, pendingHomework } = params
+  const { nextExam, weakestTopic, totalDueCards, pendingHomework, hasStarted } = params
 
   if (nextExam && nextExam.daysAway <= 3) {
     return `Your ${nextExam.courseName} exam is in ${nextExam.daysAway} day${nextExam.daysAway === 1 ? '' : 's'} — focus everything there today.`
   }
   if (nextExam && nextExam.daysAway <= 7) {
-    const weak = weakestTopic ? ` Start with ${weakestTopic.topicName}.` : ''
+    const weak = hasStarted && weakestTopic ? ` Start with ${weakestTopic.topicName}.` : ''
     return `${nextExam.courseName} exam in ${nextExam.daysAway} days — prioritize review sessions now.${weak}`
+  }
+  // Brand-new: nothing reviewed yet. Frame it as a fresh start with a concrete next
+  // step — NOT as a "weakest area" (every topic is 0% only because it's untouched).
+  if (!hasStarted) {
+    if (pendingHomework > 0) {
+      return `You have ${pendingHomework} assignment${pendingHomework > 1 ? 's' : ''} to start with — then run a flashcard review to begin building mastery.`
+    }
+    if (totalDueCards > 0) {
+      return `Your study materials are ready — start a flashcard review to begin building mastery across your topics.`
+    }
+    return `Your courses are set up — generate some flashcards and start a study session to begin.`
   }
   if (weakestTopic && weakestTopic.mastery < 0.3) {
     return `Your weakest area is ${weakestTopic.topicName} in ${weakestTopic.courseName} — it's a high-weight topic worth focusing on.`
@@ -106,7 +119,7 @@ export async function runScheduler(userId: string): Promise<void> {
 
   const nextExamByCourse: Record<string, number> = {}
   for (const exam of exams ?? []) {
-    const days = Math.ceil((new Date(exam.date).getTime() - Date.now()) / 86400000)
+    const days = daysBetweenDateKeys(today, exam.date)
     if (!(exam.course_id in nextExamByCourse) || days < nextExamByCourse[exam.course_id]) {
       nextExamByCourse[exam.course_id] = days
     }
@@ -339,7 +352,7 @@ export async function runScheduler(userId: string): Promise<void> {
       course_id: a.course_id,
       course_name: courseNameMap[a.course_id] ?? '',
       assignment_id: a.assignment_id,
-      title: a.name,
+      title: prettifyTitle(a.name),
       due_date: a.due_date,
       overdue: a.due_date < today,
       order: hwOrder++,
@@ -359,12 +372,22 @@ export async function runScheduler(userId: string): Promise<void> {
   const totalDueCards = scored.reduce((sum, c) => sum + c.card_count, 0)
   const pendingHomework = (assignments ?? []).length
 
+  // "Started" = has reviewed at least one card. Drives encouraging cold-start
+  // framing instead of a misleading "your weakest area is X" on a fresh account.
+  const { count: reviewedCount } = await service
+    .from('flashcards')
+    .select('card_id', { count: 'exact', head: true })
+    .eq('user_id', userId)
+    .gt('fsrs_reps', 0)
+  const hasStarted = (reviewedCount ?? 0) > 0
+
   const insightText = buildInsight({
     courses,
     nextExam,
     weakestTopic: overallWeakest,
     totalDueCards,
     pendingHomework,
+    hasStarted,
   })
 
   const allTasks: TaskItem[] = [
@@ -502,7 +525,7 @@ export async function generateUpcomingPreview(userId: string): Promise<void> {
         course_id: a.course_id,
         course_name: courseNameMap[a.course_id] ?? '',
         assignment_id: a.assignment_id,
-        title: a.name,
+        title: prettifyTitle(a.name),
         due_date: a.due_date,
         overdue: false,
         order: order++,
