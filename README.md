@@ -6,7 +6,7 @@
   <img src="https://img.shields.io/badge/TypeScript-5-3178C6" alt="TypeScript" />
   <img src="https://img.shields.io/badge/Supabase-PostgreSQL-3ECF8E" alt="Supabase" />
   <img src="https://img.shields.io/badge/Claude-Sonnet%204.6-CC785C" alt="Claude" />
-  <img src="https://img.shields.io/badge/release-v1.3.0-1D4ED8" alt="v1.3.0" />
+  <img src="https://img.shields.io/badge/release-v1.3.1-1D4ED8" alt="v1.3.1" />
   <img src="https://img.shields.io/badge/hosting-self--host%20%7C%20multi--tenant-7C3AED" alt="Self-host or multi-tenant" />
   <img src="https://img.shields.io/badge/status-beta-F59E0B" alt="Beta" />
   <a href="https://trycogni.arshawnarbabi.com/"><img src="https://img.shields.io/badge/website-trycogni.arshawnarbabi.com-1D4ED8" alt="Website" /></a>
