@@ -36,16 +36,18 @@ export async function POST() {
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   const service = createServiceClient()
-  // One active token per user — rotating drops the old one (any previously-connected
-  // client stops working, which is the intended "regenerate" behavior).
-  await service.from('mcp_tokens').delete().eq('user_id', user.id)
-
   const { token, hash } = generateMcpToken()
+  // One active token per user (user_id is the PK). Upsert ATOMICALLY replaces any
+  // existing token in a single statement, so concurrent regenerates can't leave two
+  // valid tokens — and the old token is revoked the instant the new one is written.
   const { error } = await service
     .from('mcp_tokens')
-    .insert({ token_hash: hash, user_id: user.id, label: 'claude' })
+    .upsert(
+      { user_id: user.id, token_hash: hash, label: 'claude', created_at: new Date().toISOString(), last_used_at: null },
+      { onConflict: 'user_id' },
+    )
   if (error) {
-    console.error('[mcp-token] insert failed', error)
+    console.error('[mcp-token] upsert failed', error)
     return NextResponse.json({ error: 'Could not create token' }, { status: 500 })
   }
 
