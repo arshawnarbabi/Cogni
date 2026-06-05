@@ -375,6 +375,11 @@ export async function POST(request: Request) {
         },
         required: ['file', 'insight'],
       },
+      // Prompt-cache breakpoint: caches ALL tools up to and including this one. The
+      // tool schemas are byte-identical every turn (and re-sent on each tool-loop
+      // iteration), so this is the highest-ROI, zero-risk cache. Cached reads cost
+      // 0.1x; the 5-min TTL easily spans a tutoring turn.
+      cache_control: { type: 'ephemeral' as const },
     },
   ]
 
@@ -394,6 +399,22 @@ export async function POST(request: Request) {
           { role: 'user', content: userContent },
         ]
 
+        // Cache the conversation prefix too: mark the current user message so that
+        // tools + system + history up to here are a cache READ on each tool-loop
+        // iteration (the loop runs up to 5x) and on the next turn within the TTL.
+        // Exactly ONE message breakpoint, set once → total breakpoints stay at 3
+        // (tools, static system, this), well under the 4-breakpoint limit.
+        {
+          const last = messages[messages.length - 1]
+          const ephemeral = { type: 'ephemeral' as const }
+          if (typeof last.content === 'string') {
+            last.content = [{ type: 'text', text: last.content, cache_control: ephemeral }]
+          } else if (Array.isArray(last.content) && last.content.length > 0) {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            ;(last.content[last.content.length - 1] as any).cache_control = ephemeral
+          }
+        }
+
         let fullText = ''
         const serverInlineCards: object[] = []
         let iterations = 0
@@ -405,7 +426,13 @@ export async function POST(request: Request) {
           const streamParams: any = {
             model: deepThink ? 'claude-opus-4-8' : 'claude-sonnet-4-6',
             max_tokens: deepThink ? 16000 : 4096,
-            system: systemPrompt,
+            // System as two blocks: the static prefix is cached (identical across all
+            // turns/sessions/courses), the dynamic suffix (course, mode, RAG, profile)
+            // is not. This is the system-prompt half of prompt caching.
+            system: [
+              { type: 'text', text: systemPrompt.static, cache_control: { type: 'ephemeral' as const } },
+              { type: 'text', text: systemPrompt.dynamic },
+            ],
             tools,
             messages,
           }
@@ -466,6 +493,19 @@ export async function POST(request: Request) {
           }
 
           const final = await stream.finalMessage()
+
+          // Cache observability: turn 1 of a session writes the cache
+          // (cache_creation_input_tokens > 0); later turns/iterations should READ it
+          // (cache_read_input_tokens > 0). Watch these logs to confirm hits.
+          const u = final.usage
+          console.log('[tutor] usage', JSON.stringify({
+            model: streamParams.model,
+            iter: iterations,
+            input: u.input_tokens,
+            output: u.output_tokens,
+            cache_write: u.cache_creation_input_tokens ?? 0,
+            cache_read: u.cache_read_input_tokens ?? 0,
+          }))
 
           if (final.stop_reason === 'tool_use') {
             const toolResults: Anthropic.ToolResultBlockParam[] = []
