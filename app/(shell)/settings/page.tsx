@@ -13,6 +13,7 @@ import { TutorLimitPicker } from './_tutor-limit'
 import { AppearancePicker } from './_appearance'
 import { AccountSection } from './_account'
 import { KnowledgeStore } from './_knowledge-store'
+import { ConnectClaude } from './_connect-claude'
 import { CheckCircle, XCircle } from '@phosphor-icons/react/dist/ssr'
 
 export const dynamic = 'force-dynamic'
@@ -27,7 +28,7 @@ export default async function SettingsPage() {
 
   const [calRow, userData, anthropicKey, openaiKey, materialsData, wikiFiles, professorsData] = await Promise.all([
     service.from('calendar_connections').select('cogni_calendar_id').eq('user_id', user.id).eq('provider', 'google').single(),
-    service.from('users').select('session_length_preference, display_name, daily_message_limit').eq('user_id', user.id).single(),
+    service.from('users').select('session_length_preference, display_name, daily_message_limit, prefer_own_claude').eq('user_id', user.id).single(),
     getUserApiKey(user.id),
     getUserKey(user.id, 'openai_key'),
     service.from('materials').select('course_id, tier, uploaded_at').eq('user_id', user.id).eq('processing_status', 'processed'),
@@ -39,6 +40,7 @@ export default async function SettingsPage() {
   const calendarName = calRow.data ? 'Cogni Study' : null
   const sessionLength = (userData.data?.session_length_preference as number) ?? 45
   const dailyMessageLimit = (userData.data?.daily_message_limit as number | null) ?? null
+  const preferOwnClaude = (userData.data?.prefer_own_claude as boolean | undefined) ?? false
   const anthropicIsSet = !!anthropicKey && anthropicKey.length > 0
   const anthropicPreview = anthropicIsSet ? `••••${anthropicKey!.slice(-4)}` : null
   const openaiIsSet = !!openaiKey && openaiKey.length > 0
@@ -118,6 +120,9 @@ export default async function SettingsPage() {
           </div>
           <SessionLengthPicker initial={sessionLength} />
         </section>
+
+        {/* Connect your Claude (MCP) */}
+        <ConnectClaude initialPreferOwnClaude={preferOwnClaude} />
 
         {/* Calendar */}
         <CalendarSection connected={connected} calendarName={calendarName} />
