@@ -1357,3 +1357,27 @@ as $$
 $$;
 revoke all     on function public.list_user_scoped_tables() from anon, authenticated, public;
 grant  execute on function public.list_user_scoped_tables() to service_role;
+
+
+-- ======================================================================
+-- Section 11: MCP — "bring your own Claude" connector
+-- ======================================================================
+-- Per-user bearer tokens for the Cogni MCP server (a user connects their own Claude
+-- client to Cogni and tools are scoped to their data). Only the SHA-256 hash is
+-- stored, never the plaintext token.
+create table if not exists public.mcp_tokens (
+  token_hash text primary key,
+  user_id    uuid not null references auth.users(id) on delete cascade,
+  label      text,
+  created_at timestamptz not null default now(),
+  last_used_at timestamptz
+);
+create index if not exists idx_mcp_tokens_user on public.mcp_tokens(user_id);
+alter table public.mcp_tokens enable row level security;
+-- No policies: only the server (service role) reads/writes these; RLS denies anon/authenticated.
+
+-- Opt-in: route the in-app Tutor tab to the user's own Claude (via MCP) instead of
+-- the built-in BYOK-API tutor.
+alter table public.users add column if not exists prefer_own_claude boolean not null default false;
+
+notify pgrst, 'reload schema';
