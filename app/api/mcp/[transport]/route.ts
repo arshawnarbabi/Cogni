@@ -204,7 +204,18 @@ const handler = createMcpHandler(
     )
   },
   {},
-  { basePath: '/api/mcp', maxDuration: 60, verboseLogs: false },
+  {
+    basePath: '/api/mcp',
+    maxDuration: 60,
+    verboseLogs: false,
+    // Stateless Streamable-HTTP only. On Vercel each request can hit a different
+    // serverless instance, so the default (per-process session/SSE state) breaks
+    // after `initialize` (works locally as one process, 500s on serverless). Disabling
+    // SSE forces pure request/response with no cross-request state. If you ever need
+    // resumable streams at scale, set REDIS_URL and the handler will use it instead.
+    disableSse: true,
+    redisUrl: process.env.REDIS_URL || process.env.KV_URL,
+  },
 )
 
 const authHandler = withMcpAuth(handler, verifyMcpToken, { required: true })
