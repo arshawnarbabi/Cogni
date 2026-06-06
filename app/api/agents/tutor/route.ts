@@ -21,6 +21,7 @@ import { applyMasteryEvidence, resolveTopicByName, LEARNING_RATES } from '@/lib/
 import { keyFailureKind, markKeyStatus } from '@/lib/ai/call'
 import { compactHistory, distillPreviousSessionIfNeeded } from '@/lib/agents/memory'
 import { armDistillJob, kickJobs } from '@/lib/jobs'
+import { recordUsage } from '@/lib/usage'
 import Anthropic from '@anthropic-ai/sdk'
 import { NextResponse } from 'next/server'
 
@@ -562,6 +563,8 @@ export async function POST(request: Request) {
             cache_write: u.cache_creation_input_tokens ?? 0,
             cache_read: u.cache_read_input_tokens ?? 0,
           }))
+          // C7: persist for the Settings Usage & Cost panel (was console-only).
+          recordUsage(user.id, 'tutor', streamParams.model, u)
 
           if (final.stop_reason === 'tool_use') {
             const toolResults: Anthropic.ToolResultBlockParam[] = []

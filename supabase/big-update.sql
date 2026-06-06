@@ -425,6 +425,45 @@ create index if not exists idx_topic_prereq_user_course on public.topic_prerequi
 alter table public.users add column if not exists calendar_feed_token uuid;
 create index if not exists idx_users_calendar_feed_token on public.users(calendar_feed_token) where calendar_feed_token is not null;
 
+-- ======================================================================
+-- Section 16: Incremental embeddings (C4 + R4)
+-- ======================================================================
+-- content_hash lets re-embeds skip unchanged chunks (re-runs were silently
+-- re-billing the student's OpenAI key for identical text), and the unique
+-- (material_id, chunk_index) index turns the old delete-all-then-reinsert —
+-- which left a material with ZERO embeddings if a batch failed mid-loop —
+-- into an atomic upsert-per-chunk swap.
+alter table public.material_embeddings add column if not exists content_hash text;
+-- Defensive de-dup before the unique index (the old path could not create
+-- duplicates, but a reused DB might have them).
+delete from public.material_embeddings a using public.material_embeddings b
+  where a.material_id = b.material_id and a.chunk_index = b.chunk_index and a.ctid < b.ctid;
+create unique index if not exists material_embeddings_material_chunk_uniq
+  on public.material_embeddings(material_id, chunk_index);
+
+-- ======================================================================
+-- Section 17: Usage & cost transparency (C7)
+-- ======================================================================
+-- BYOK means the student pays — and previously flew blind (the tutor logged
+-- token usage to console and threw it away). One row per model call; the
+-- Settings panel aggregates spend by surface and shows what caching saved.
+create table if not exists public.usage_events (
+  event_id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references public.users(user_id) on delete cascade,
+  surface text not null,
+  model text,
+  input_tokens integer not null default 0,
+  output_tokens integer not null default 0,
+  cache_read_tokens integer not null default 0,
+  cache_write_tokens integer not null default 0,
+  created_at timestamptz not null default now()
+);
+alter table public.usage_events enable row level security;
+drop policy if exists "usage_events: own rows only" on public.usage_events;
+create policy "usage_events: own rows only" on public.usage_events
+  for select using (auth.uid() = user_id);
+create index if not exists idx_usage_events_user_created on public.usage_events(user_id, created_at);
+
 -- PostgREST must see the new unique indexes + function signature before the
 -- app's upsert-on-conflict / RPC calls work.
 notify pgrst, 'reload schema';

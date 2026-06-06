@@ -16,6 +16,7 @@ import { KnowledgeStore } from './_knowledge-store'
 import { ConnectClaude } from './_connect-claude'
 import { MemoryCenter } from './_memory'
 import { CalendarFeed } from './_calendar-feed'
+import { UsagePanel } from './_usage'
 import { CheckCircle, XCircle } from '@phosphor-icons/react/dist/ssr'
 
 export const dynamic = 'force-dynamic'
@@ -182,6 +183,9 @@ export default async function SettingsPage() {
             </>
           )}
         </section>
+
+        {/* Usage & cost (C7) */}
+        <UsagePanel />
 
         {/* Tutor memory (M7) */}
         <MemoryCenter />

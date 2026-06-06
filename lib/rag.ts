@@ -1,6 +1,7 @@
 import { createServiceClient } from '@/lib/supabase/server'
 import { getUserKey } from '@/lib/user-keys'
 import { withRetry } from '@/lib/ai/call'
+import crypto from 'node:crypto'
 
 // ~800 tokens at 4 chars/token
 const CHUNK_SIZE = 3200
@@ -57,6 +58,8 @@ export function chunkText(text: string): { content: string; chunk_index: number 
   return chunks
 }
 
+const chunkHash = (content: string) => crypto.createHash('sha256').update(content).digest('hex')
+
 export async function processEmbeddings(
   userId: string,
   materialId: string,
@@ -76,50 +79,83 @@ export async function processEmbeddings(
   const chunks = chunkText(text)
   if (chunks.length === 0) return
 
-  // Replace existing embeddings for this material
+  // C4: incremental — skip chunks whose content hash is unchanged (re-runs
+  // previously re-billed the student's OpenAI key for identical text).
+  // R4: crash-safe — embed FIRST (a provider failure aborts before any write,
+  // leaving the old corpus fully intact), then upsert per chunk on the
+  // (material_id, chunk_index) unique index, then prune leftovers. The old
+  // delete-all-then-reinsert left a material with ZERO embeddings whenever a
+  // batch failed mid-loop.
+  const { data: existingRows } = await service
+    .from('material_embeddings')
+    .select('chunk_index, content_hash')
+    .eq('material_id', materialId)
+    .eq('user_id', userId)
+  const existingHashByIndex = new Map(
+    ((existingRows ?? []) as { chunk_index: number; content_hash: string | null }[])
+      .map(r => [r.chunk_index, r.content_hash])
+  )
+
+  const withHashes = chunks.map(c => ({ ...c, hash: chunkHash(c.content) }))
+  const changed = withHashes.filter(c => existingHashByIndex.get(c.chunk_index) !== c.hash)
+
+  if (changed.length > 0) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let rows: any[]
+    if (openaiKey) {
+      const { default: OpenAI } = await import('openai')
+      const openai = new OpenAI({ apiKey: openaiKey })
+
+      // Embed everything into memory first — no DB writes until all batches succeed.
+      const embeddings: number[][] = []
+      const batchSize = 100
+      for (let i = 0; i < changed.length; i += batchSize) {
+        const batch = changed.slice(i, i + batchSize)
+        const response = await withRetry(
+          () => openai.embeddings.create({
+            model: 'text-embedding-3-small',
+            input: batch.map(c => c.content),
+          }),
+          { label: 'rag.embed', keyHealth: { userId, provider: 'openai' } },
+        )
+        embeddings.push(...response.data.map(d => d.embedding))
+      }
+      rows = changed.map((chunk, i) => ({
+        user_id: userId,
+        material_id: materialId,
+        chunk_index: chunk.chunk_index,
+        content: chunk.content,
+        content_hash: chunk.hash,
+        embedding: embeddings[i],
+      }))
+    } else {
+      // No OpenAI key — store chunks without embeddings for keyword fallback
+      rows = changed.map(chunk => ({
+        user_id: userId,
+        material_id: materialId,
+        chunk_index: chunk.chunk_index,
+        content: chunk.content,
+        content_hash: chunk.hash,
+        embedding: null,
+      }))
+    }
+
+    const { error: upsertError } = await service
+      .from('material_embeddings')
+      .upsert(rows, { onConflict: 'material_id,chunk_index' })
+    if (upsertError) {
+      console.error('[rag] embeddings upsert failed', upsertError)
+      return // old rows remain — corpus never shrinks on failure
+    }
+  }
+
+  // Prune rows past the new chunk count (the material shrank).
   await service
     .from('material_embeddings')
     .delete()
     .eq('material_id', materialId)
     .eq('user_id', userId)
-
-  if (openaiKey) {
-    const { default: OpenAI } = await import('openai')
-    const openai = new OpenAI({ apiKey: openaiKey })
-
-    const batchSize = 100
-    for (let i = 0; i < chunks.length; i += batchSize) {
-      const batch = chunks.slice(i, i + batchSize)
-      const response = await withRetry(
-        () => openai.embeddings.create({
-          model: 'text-embedding-3-small',
-          input: batch.map(c => c.content),
-        }),
-        { label: 'rag.embed', keyHealth: { userId, provider: 'openai' } },
-      )
-
-      await service.from('material_embeddings').insert(
-        batch.map((chunk, j) => ({
-          user_id: userId,
-          material_id: materialId,
-          chunk_index: chunk.chunk_index,
-          content: chunk.content,
-          embedding: response.data[j].embedding,
-        }))
-      )
-    }
-  } else {
-    // No OpenAI key — store chunks without embeddings for keyword fallback
-    await service.from('material_embeddings').insert(
-      chunks.map(chunk => ({
-        user_id: userId,
-        material_id: materialId,
-        chunk_index: chunk.chunk_index,
-        content: chunk.content,
-        embedding: null,
-      }))
-    )
-  }
+    .gte('chunk_index', chunks.length)
 }
 
 // Why a retrieval came back empty (or didn't). Callers surface these distinctly:
