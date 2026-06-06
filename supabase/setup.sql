@@ -810,6 +810,14 @@ drop function if exists public.review_card_atomic(
   uuid, uuid, numeric, numeric, integer, integer, integer, timestamptz, date, numeric
 );
 
+-- Unified mastery model (F3): the additive-delta signature is replaced by
+-- evidence (observed level + learning rate) applied as an EWMA — the SAME rule
+-- lib/mastery.ts uses for tutor grades and quizzes, so all three writers move
+-- the score on one scale. Drop the old delta signature.
+drop function if exists public.review_card_atomic(
+  uuid, uuid, numeric, numeric, integer, integer, text, timestamptz, date, numeric
+);
+
 create or replace function public.review_card_atomic(
   p_card_id uuid,
   p_user_id uuid,
@@ -820,7 +828,8 @@ create or replace function public.review_card_atomic(
   p_fsrs_state text,
   p_fsrs_last_review timestamptz,
   p_fsrs_next_review_date date,
-  p_mastery_delta numeric
+  p_observed numeric,        -- 0..1: what this rating says the student's level is
+  p_learning_rate numeric    -- how far to move toward it (pre-scaled by deck size)
 ) returns void
 language plpgsql
 security definer
@@ -846,10 +855,17 @@ begin
   end if;
 
   if v_topic_id is not null then
+    -- EWMA toward the observed level: next = old + lr * (observed - old).
+    -- Cold start (no row): adopt observed directly — the prior is uninformative.
+    -- confidence grows +0.05 per evidence event (was a dead column, always 0).
     insert into public.topic_mastery (user_id, topic_id, mastery_score, confidence, last_updated)
-    values (p_user_id, v_topic_id, greatest(0, least(1, p_mastery_delta)), 0, now())
+    values (p_user_id, v_topic_id, greatest(0, least(1, p_observed)), 0.05, now())
     on conflict (user_id, topic_id) do update
-      set mastery_score = greatest(0, least(1, coalesce(public.topic_mastery.mastery_score, 0) + p_mastery_delta)),
+      set mastery_score = greatest(0, least(1,
+            coalesce(public.topic_mastery.mastery_score, 0)
+            + greatest(0, least(1, p_learning_rate))
+              * (greatest(0, least(1, p_observed)) - coalesce(public.topic_mastery.mastery_score, 0)))),
+          confidence = least(1, coalesce(public.topic_mastery.confidence, 0) + 0.05),
           last_updated = now();
 
     insert into public.mastery_history (user_id, topic_id, mastery_score)
@@ -861,9 +877,13 @@ begin
 end;
 $$;
 
+-- service_role ONLY (was also granted to authenticated): the function is
+-- SECURITY DEFINER and takes p_user_id as a parameter, so any logged-in user
+-- could have replayed it against another user's card_id/user_id. Only the
+-- server route calls it, via the service client.
 grant execute on function public.review_card_atomic(
-  uuid, uuid, numeric, numeric, integer, integer, text, timestamptz, date, numeric
-) to authenticated, service_role;
+  uuid, uuid, numeric, numeric, integer, integer, text, timestamptz, date, numeric, numeric
+) to service_role;
 
 
 -- ----- rag-functions.sql -----

@@ -23,8 +23,8 @@ beforeAll(() => {
   if (!URL_ || !KEY_) throw new Error('SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY required')
 })
 
-describe('review_card_atomic RPC', () => {
-  it('updates FSRS, applies clamped mastery delta, and writes history (existing row)', async () => {
+describe('review_card_atomic RPC (evidence model, F3)', () => {
+  it('updates FSRS, applies the EWMA evidence rule, and writes history (existing row)', async () => {
     const topic = seed.topics.kinematics
     // pin a known starting mastery
     await db.from('topic_mastery').update({ mastery_score: 0.5 }).eq('user_id', seed.userId).eq('topic_id', topic)
@@ -34,7 +34,7 @@ describe('review_card_atomic RPC', () => {
       p_card_id: seed.cards[0], p_user_id: seed.userId,
       p_fsrs_stability: 12.3, p_fsrs_difficulty: 6.1, p_fsrs_reps: 99, p_fsrs_lapses: 1,
       p_fsrs_state: 'review', p_fsrs_last_review: new Date().toISOString(),
-      p_fsrs_next_review_date: '2099-01-01', p_mastery_delta: 0.08,
+      p_fsrs_next_review_date: '2099-01-01', p_observed: 0.75, p_learning_rate: 0.2,
     })
     expect(error).toBeNull()
 
@@ -42,11 +42,12 @@ describe('review_card_atomic RPC', () => {
     expect(card!.fsrs_reps).toBe(99)
     expect(card!.fsrs_next_review_date).toBe('2099-01-01')
 
-    expect(await masteryOf(topic)).toBeCloseTo(0.58, 5)   // 0.50 + 0.08
+    // 0.5 + 0.2 * (0.75 - 0.5) = 0.55
+    expect(await masteryOf(topic)).toBeCloseTo(0.55, 5)
     expect(await historyCount(topic)).toBe(before + 1)     // history written
   })
 
-  it('CREATES a missing topic_mastery row instead of silently doing nothing (the fix)', async () => {
+  it('CREATES a missing topic_mastery row, adopting the observed level (cold start)', async () => {
     const topic = seed.topics.kinematics
     await db.from('topic_mastery').delete().eq('user_id', seed.userId).eq('topic_id', topic)
     expect(await masteryOf(topic)).toBeNull() // gone
@@ -55,22 +56,31 @@ describe('review_card_atomic RPC', () => {
       p_card_id: seed.cards[1], p_user_id: seed.userId,
       p_fsrs_stability: 1, p_fsrs_difficulty: 5, p_fsrs_reps: 1, p_fsrs_lapses: 0,
       p_fsrs_state: 'learning', p_fsrs_last_review: new Date().toISOString(),
-      p_fsrs_next_review_date: '2099-02-02', p_mastery_delta: 0.08,
+      p_fsrs_next_review_date: '2099-02-02', p_observed: 0.75, p_learning_rate: 0.2,
     })
     expect(error).toBeNull()
-    expect(await masteryOf(topic)).toBeCloseTo(0.08, 5) // recreated, not no-op
+    expect(await masteryOf(topic)).toBeCloseTo(0.75, 5) // recreated at observed, not no-op
   })
 
-  it('clamps mastery to a max of 1.0', async () => {
+  it('moves toward 1.0 without overshooting (EWMA converges asymptotically)', async () => {
     const topic = seed.topics.kinematics
     await db.from('topic_mastery').update({ mastery_score: 0.95 }).eq('user_id', seed.userId).eq('topic_id', topic)
     await db.rpc('review_card_atomic', {
       p_card_id: seed.cards[0], p_user_id: seed.userId,
       p_fsrs_stability: 1, p_fsrs_difficulty: 5, p_fsrs_reps: 2, p_fsrs_lapses: 0,
       p_fsrs_state: 'review', p_fsrs_last_review: new Date().toISOString(),
-      p_fsrs_next_review_date: '2099-03-03', p_mastery_delta: 0.12,
+      p_fsrs_next_review_date: '2099-03-03', p_observed: 1.0, p_learning_rate: 0.25,
     })
-    expect(await masteryOf(topic)).toBe(1) // 0.95 + 0.12 clamped to 1
+    // 0.95 + 0.25 * (1.0 - 0.95) = 0.9625
+    const m = await masteryOf(topic)
+    expect(m).toBeGreaterThan(0.95)
+    expect(m).toBeLessThanOrEqual(1)
+  })
+
+  it('grows the confidence column with each evidence event (was always 0)', async () => {
+    const topic = seed.topics.kinematics
+    const { data: row } = await db.from('topic_mastery').select('confidence').eq('user_id', seed.userId).eq('topic_id', topic).single()
+    expect(Number(row!.confidence)).toBeGreaterThan(0)
   })
 
   it('rejects a review for a card the user does not own', async () => {
@@ -78,7 +88,7 @@ describe('review_card_atomic RPC', () => {
       p_card_id: seed.cards[0], p_user_id: '00000000-0000-0000-0000-000000000000',
       p_fsrs_stability: 1, p_fsrs_difficulty: 5, p_fsrs_reps: 1, p_fsrs_lapses: 0,
       p_fsrs_state: 'review', p_fsrs_last_review: new Date().toISOString(),
-      p_fsrs_next_review_date: '2099-01-01', p_mastery_delta: 0.08,
+      p_fsrs_next_review_date: '2099-01-01', p_observed: 0.75, p_learning_rate: 0.2,
     })
     expect(error).not.toBeNull() // "card not found or not owned by user"
   })

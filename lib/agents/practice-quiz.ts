@@ -1,6 +1,7 @@
 import { createServiceClient } from '@/lib/supabase/server'
 import { getUserApiKey } from '@/lib/vault'
 import { readWikiFile } from '@/lib/wiki'
+import { applyMasteryEvidence, resolveTopicByName } from '@/lib/mastery'
 import Anthropic from '@anthropic-ai/sdk'
 
 export type QuizFormat = 'mc' | 'short_answer' | 'mixed'
@@ -321,64 +322,33 @@ Return JSON only: {"score": 0.0-1.0, "correct": true/false, "feedback": "one sen
     .eq('course_id', courseId)
     .eq('user_id', userId)
 
-  const topicByName = new Map<string, string>()
-  for (const t of (courseTopics ?? []) as { topic_id: string; name: string }[]) {
-    topicByName.set(t.name.toLowerCase(), t.topic_id)
-  }
+  const topicRows = (courseTopics ?? []) as { topic_id: string; name: string }[]
 
   const resolvedTopics: { topicName: string; topic_id: string; newScore: number }[] = []
   for (const [topicName, scores] of topicScores) {
-    const needle = topicName.toLowerCase()
-    let topic_id = topicByName.get(needle)   // exact match wins
-    if (!topic_id) {
-      // fallback: pick the longest matching candidate deterministically
-      let bestName = ''
-      for (const [name, id] of topicByName) {
-        if (name.includes(needle) || needle.includes(name)) {
-          if (name.length > bestName.length) { bestName = name; topic_id = id }
-        }
-      }
-    }
+    // Shared resolution (lib/mastery): exact case-insensitive match, then longest
+    // containment — same contract as the tutor's grade_answer path.
+    const topic_id = resolveTopicByName(topicName, topicRows)
     if (!topic_id) continue
     resolvedTopics.push({ topicName, topic_id, newScore: scores.correct / scores.total })
   }
 
   if (resolvedTopics.length > 0) {
-    const topicIds = resolvedTopics.map(r => r.topic_id)
-    const { data: existingRows } = await service
-      .from('topic_mastery')
-      .select('topic_id, mastery_score')
-      .eq('user_id', userId)
-      .in('topic_id', topicIds)
-
-    const existingByTopic = new Map<string, number>()
-    for (const row of (existingRows ?? []) as { topic_id: string; mastery_score: number | null }[]) {
-      existingByTopic.set(row.topic_id, Number(row.mastery_score ?? 0))
-    }
-
-    const nowIso = new Date().toISOString()
-    const masteryUpserts: { user_id: string; topic_id: string; mastery_score: number; last_updated: string }[] = []
-    const historyInserts: { user_id: string; topic_id: string; mastery_score: number }[] = []
-
-    for (const r of resolvedTopics) {
-      const oldScore = existingByTopic.get(r.topic_id) ?? 0
-      const hadExisting = existingByTopic.has(r.topic_id)
-      const blended = hadExisting ? oldScore * (1 - masteryWeight) + r.newScore * masteryWeight : r.newScore
-      const finalScore = Math.min(1, Math.max(0, blended))
-
-      masteryUpserts.push({ user_id: userId, topic_id: r.topic_id, mastery_score: finalScore, last_updated: nowIso })
-      historyInserts.push({ user_id: userId, topic_id: r.topic_id, mastery_score: finalScore })
-      masteryUpdates.push({ topic_id: r.topic_id, topicName: r.topicName, oldScore, newScore: finalScore })
-    }
-
-    if (masteryUpserts.length > 0) {
-      const { error: masteryError } = await service
-        .from('topic_mastery')
-        .upsert(masteryUpserts, { onConflict: 'user_id,topic_id' })
-      if (masteryError) console.error('[practice-quiz] mastery upsert failed', masteryError)
-
-      const { error: historyError } = await service.from('mastery_history').insert(historyInserts)
-      if (historyError) console.error('[practice-quiz] mastery history insert failed', historyError)
+    // Unified mastery service (F3). masteryWeight is the learning rate — the EWMA
+    // form is mathematically identical to the blend this path always used, so quiz
+    // behavior is preserved; it now also writes the confidence column.
+    try {
+      const applied = await applyMasteryEvidence(
+        userId,
+        resolvedTopics.map(r => ({ topicId: r.topic_id, observed: r.newScore, learningRate: masteryWeight })),
+      )
+      const byTopic = new Map(applied.map(a => [a.topicId, a]))
+      for (const r of resolvedTopics) {
+        const a = byTopic.get(r.topic_id)
+        if (a) masteryUpdates.push({ topic_id: r.topic_id, topicName: r.topicName, oldScore: a.oldScore, newScore: a.newScore })
+      }
+    } catch (e) {
+      console.error('[practice-quiz] mastery evidence write failed', e)
     }
   }
 

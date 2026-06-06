@@ -28,7 +28,8 @@ describe('tenant isolation — exposed SECURITY DEFINER RPCs are locked down', (
     const { error } = await anon.rpc('review_card_atomic', {
       p_card_id: seed.cards[0], p_user_id: seed.userId,
       p_fsrs_stability: 1, p_fsrs_difficulty: 1, p_fsrs_reps: 0, p_fsrs_lapses: 0,
-      p_fsrs_state: 'review', p_fsrs_last_review: null, p_fsrs_next_review_date: '2099-01-01', p_mastery_delta: 0.5,
+      p_fsrs_state: 'review', p_fsrs_last_review: null, p_fsrs_next_review_date: '2099-01-01',
+      p_observed: 0.75, p_learning_rate: 0.2,
     })
     expect(error, 'should be permission-denied').not.toBeNull()
   })

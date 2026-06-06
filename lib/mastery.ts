@@ -1,0 +1,186 @@
+import { createServiceClient } from '@/lib/supabase/server'
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Unified mastery service (F3) — the ONE place mastery math lives.
+//
+// Previously three writers fought over topic_mastery.mastery_score on three
+// incompatible scales (verified bug B4):
+//   - tutor grade_answer  → ABSOLUTE set (one question nuked/maxed the topic)
+//   - practice quiz       → exponential blend old*(1-w) + new*w
+//   - flashcard review    → flat additive delta (-0.1/+0.02/+0.08/+0.12)
+// The displayed score depended on the ORDER you studied in. Every writer now
+// expresses its signal as evidence: { observed level 0..1, learning rate } and
+// the same update rule applies everywhere:
+//
+//     next = old + learningRate * (observed - old)        (EWMA toward observed)
+//
+// learningRate encodes how much one piece of evidence should move the estimate:
+//   - a graded quiz over several questions is strong (0.6 standalone / 0.3 in-session
+//     — IDENTICAL math to the old quiz blend, so quiz behavior is preserved)
+//   - a single tutor verification question is moderate (0.35 — no longer absolute)
+//   - one flashcard flip is weak, and scaled by 1/sqrt(cards in the topic) so one
+//     "Good" on a 50-card topic moves the topic far less than on a 3-card topic
+//
+// confidence (previously a dead column, always 0) now grows with each piece of
+// evidence — downstream consumers can distinguish "50% after 40 reviews" from
+// "50% after one quiz".
+//
+// The flashcard path applies this rule INSIDE the review_card_atomic RPC (it must
+// stay transactional with the FSRS write); the RPC receives (observed, learningRate)
+// computed by flashcardEvidence() below, so the policy still lives here.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const LEARNING_RATES = {
+  tutor_grade: 0.35,
+  quiz_standalone: 0.6,
+  quiz_in_session: 0.3,
+  exam: 0.7,
+  flashcard_base: 0.25,
+} as const
+
+// What a flashcard rating says about the student's level on the topic.
+const OBSERVED_BY_RATING: Record<1 | 2 | 3 | 4, number> = {
+  1: 0,    // Again — didn't know it
+  2: 0.45, // Hard — knew it shakily
+  3: 0.75, // Good
+  4: 1.0,  // Easy
+}
+
+const CONFIDENCE_STEP = 0.05
+
+export type MasteryUpdate = {
+  score: number
+  confidence: number
+}
+
+// The shared update rule. Pure — unit-tested directly.
+// hasPrior=false (no topic_mastery row at all) → the prior is uninformative, so
+// adopt the observed level directly instead of blending against a phantom zero.
+// (Profiler-seeded topics have a real score-0 row, so they DO blend from 0 —
+// matching the previous quiz behavior exactly.)
+export function nextMastery(
+  oldScore: number,
+  oldConfidence: number,
+  observed: number,
+  learningRate: number,
+  hasPrior: boolean,
+): MasteryUpdate {
+  const clampedObserved = Math.min(1, Math.max(0, observed))
+  const lr = Math.min(1, Math.max(0, learningRate))
+  const score = hasPrior
+    ? Math.min(1, Math.max(0, oldScore + lr * (clampedObserved - oldScore)))
+    : clampedObserved
+  const confidence = Math.min(1, Math.max(0, oldConfidence) + CONFIDENCE_STEP)
+  return { score: round2(score), confidence: round2(confidence) }
+}
+
+function round2(n: number): number {
+  return Math.round(n * 100) / 100
+}
+
+// Evidence parameters for one flashcard rating. The per-flip learning rate is
+// scaled by 1/sqrt(cards in topic): a topic's mastery should reflect the deck,
+// not drift unboundedly with review volume.
+export function flashcardEvidence(
+  rating: 1 | 2 | 3 | 4,
+  cardsInTopic: number,
+): { observed: number; learningRate: number } {
+  const observed = OBSERVED_BY_RATING[rating]
+  const learningRate = LEARNING_RATES.flashcard_base / Math.sqrt(Math.max(1, cardsInTopic))
+  return { observed, learningRate: round4(learningRate) }
+}
+
+function round4(n: number): number {
+  return Math.round(n * 10000) / 10000
+}
+
+// Course-scoped topic resolution shared by the tutor and quiz paths. Exact
+// (case-insensitive) match wins; falls back to the longest containment match,
+// deterministically. Returns null rather than guessing wildly — callers must
+// treat a miss as "no mastery signal", never write to an unrelated topic.
+export function resolveTopicByName(
+  topicName: string,
+  courseTopics: { topic_id: string; name: string }[],
+): string | null {
+  const needle = topicName.trim().toLowerCase()
+  if (!needle) return null
+
+  for (const t of courseTopics) {
+    if (t.name.toLowerCase() === needle) return t.topic_id
+  }
+
+  let bestName = ''
+  let bestId: string | null = null
+  for (const t of courseTopics) {
+    const name = t.name.toLowerCase()
+    if (name.includes(needle) || needle.includes(name)) {
+      if (name.length > bestName.length) {
+        bestName = name
+        bestId = t.topic_id
+      }
+    }
+  }
+  return bestId
+}
+
+export type EvidenceInput = {
+  topicId: string
+  observed: number
+  learningRate: number
+}
+
+export type AppliedEvidence = {
+  topicId: string
+  oldScore: number
+  newScore: number
+  confidence: number
+}
+
+// Apply evidence for one or many topics in three round trips total (select,
+// upsert, history insert) — the same batching the quiz path already used.
+export async function applyMasteryEvidence(
+  userId: string,
+  evidences: EvidenceInput[],
+): Promise<AppliedEvidence[]> {
+  if (evidences.length === 0) return []
+  const service = createServiceClient()
+
+  const topicIds = evidences.map(e => e.topicId)
+  const { data: existingRows } = await service
+    .from('topic_mastery')
+    .select('topic_id, mastery_score, confidence')
+    .eq('user_id', userId)
+    .in('topic_id', topicIds)
+
+  const existing = new Map<string, { score: number; confidence: number }>()
+  for (const row of (existingRows ?? []) as { topic_id: string; mastery_score: number | null; confidence: number | null }[]) {
+    existing.set(row.topic_id, { score: Number(row.mastery_score ?? 0), confidence: Number(row.confidence ?? 0) })
+  }
+
+  const nowIso = new Date().toISOString()
+  const applied: AppliedEvidence[] = []
+  const upserts: { user_id: string; topic_id: string; mastery_score: number; confidence: number; last_updated: string }[] = []
+  const history: { user_id: string; topic_id: string; mastery_score: number }[] = []
+
+  for (const e of evidences) {
+    const prior = existing.get(e.topicId)
+    const next = nextMastery(prior?.score ?? 0, prior?.confidence ?? 0, e.observed, e.learningRate, !!prior)
+    applied.push({ topicId: e.topicId, oldScore: prior?.score ?? 0, newScore: next.score, confidence: next.confidence })
+    upserts.push({ user_id: userId, topic_id: e.topicId, mastery_score: next.score, confidence: next.confidence, last_updated: nowIso })
+    history.push({ user_id: userId, topic_id: e.topicId, mastery_score: next.score })
+  }
+
+  const { error: masteryError } = await service
+    .from('topic_mastery')
+    .upsert(upserts, { onConflict: 'user_id,topic_id' })
+  if (masteryError) {
+    console.error('[mastery] upsert failed', masteryError)
+    throw new Error('mastery upsert failed')
+  }
+
+  // History rows only after a successful mastery write.
+  const { error: historyError } = await service.from('mastery_history').insert(history)
+  if (historyError) console.error('[mastery] history insert failed', historyError)
+
+  return applied
+}

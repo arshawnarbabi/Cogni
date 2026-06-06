@@ -16,6 +16,7 @@ import { requireOwnedCourse, requireOwnedSession } from '@/lib/authz'
 import { readWikiFile, writeWikiFile } from '@/lib/wiki'
 import { newCardDefaults } from '@/lib/fsrs'
 import { retrieveChunks } from '@/lib/rag'
+import { applyMasteryEvidence, resolveTopicByName, LEARNING_RATES } from '@/lib/mastery'
 import Anthropic from '@anthropic-ai/sdk'
 import { NextResponse } from 'next/server'
 
@@ -584,38 +585,42 @@ export async function POST(request: Request) {
                 const service = createServiceClient()
                 // Clamp once so the value stored and the value shown to the student agree.
                 const score = Math.min(1, Math.max(0, Number(input.score)))
-                // Look up topic for this course, update mastery
-                const { data: topic } = await service
+                // Unified mastery (F3): one verification answer is EVIDENCE, not an
+                // absolute level — EWMA at the tutor_grade learning rate (was an
+                // absolute set: one answer nuked/maxed the whole topic, bug B4).
+                // Topic resolution: exact case-insensitive match first, then longest
+                // containment — shared with the quiz path (the bare ilike could bind
+                // to an unrelated topic or silently miss).
+                const { data: courseTopics } = await service
                   .from('topics')
-                  .select('topic_id')
+                  .select('topic_id, name')
                   .eq('course_id', courseId)
                   .eq('user_id', user.id)
-                  .ilike('name', input.topic_name)
-                  .limit(1)
-                  .maybeSingle()
+                const topicId = resolveTopicByName(input.topic_name, (courseTopics ?? []) as { topic_id: string; name: string }[])
 
-                if (topic) {
-                  const { error: masteryError } = await service.from('topic_mastery').upsert({
-                    user_id: user.id,
-                    topic_id: topic.topic_id,
-                    mastery_score: score,
-                    last_updated: new Date().toISOString(),
-                  }, { onConflict: 'user_id,topic_id' })
-                  if (masteryError) {
-                    console.error('[tutor] mastery upsert failed', masteryError)
-                  } else {
-                    // History rows only after a successful mastery write (Phase 9).
-                    const { error: historyError } = await service.from('mastery_history').insert({
-                      user_id: user.id,
-                      topic_id: topic.topic_id,
-                      mastery_score: score,
-                    })
-                    if (historyError) console.error('[tutor] mastery history insert failed', historyError)
+                let gradeSaved = false
+                if (topicId) {
+                  try {
+                    await applyMasteryEvidence(user.id, [{
+                      topicId,
+                      observed: score,
+                      learningRate: LEARNING_RATES.tutor_grade,
+                    }])
+                    gradeSaved = true
+                  } catch (e) {
+                    console.error('[tutor] mastery evidence write failed', e)
                   }
                 }
 
                 controller.enqueue(emit({ t: 'grade', score, rationale: input.rationale, topic: input.topic_name }))
-                toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: 'Grade recorded.' })
+                // Honest tool result: don't tell the model "recorded" if it wasn't.
+                toolResults.push({
+                  type: 'tool_result',
+                  tool_use_id: block.id,
+                  content: gradeSaved
+                    ? 'Grade recorded.'
+                    : 'Grade shown to the student, but it could not be matched to a tracked topic — no mastery was recorded.',
+                })
               } else if (block.name === 'create_chart') {
                 const input = block.input as {
                   chart_type: string

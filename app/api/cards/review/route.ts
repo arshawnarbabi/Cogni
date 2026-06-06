@@ -1,5 +1,6 @@
 import { createClient, createServiceClient } from '@/lib/supabase/server'
 import { scheduleReview } from '@/lib/fsrs'
+import { flashcardEvidence } from '@/lib/mastery'
 import { NextResponse } from 'next/server'
 import { serverError } from '@/lib/api-error'
 
@@ -44,8 +45,20 @@ export async function POST(request: Request) {
     fsrs_next_review_date: card.fsrs_next_review_date,
   }, rating, timeZone)
 
-  // Rough mastery bump: Again=-0.1, Hard=+0.02, Good=+0.08, Easy=+0.12. Clamped 0..1 by the RPC.
-  const masteryDelta = rating === 1 ? -0.1 : rating === 2 ? 0.02 : rating === 3 ? 0.08 : 0.12
+  // Unified mastery evidence (F3): the rating maps to an observed level and a
+  // learning rate scaled by 1/sqrt(cards in this topic), applied as an EWMA
+  // inside the RPC — replacing the old flat additive delta that drifted with
+  // review volume and disagreed with the tutor/quiz scales (B4).
+  let cardsInTopic = 1
+  if (card.topic_id) {
+    const { count } = await service
+      .from('flashcards')
+      .select('card_id', { count: 'exact', head: true })
+      .eq('user_id', user.id)
+      .eq('topic_id', card.topic_id)
+    cardsInTopic = count ?? 1
+  }
+  const { observed, learningRate } = flashcardEvidence(rating, cardsInTopic)
 
   const { error: rpcError } = await service.rpc('review_card_atomic', {
     p_card_id: cardId,
@@ -57,7 +70,8 @@ export async function POST(request: Request) {
     p_fsrs_state: next.fsrs_state,
     p_fsrs_last_review: next.fsrs_last_review,
     p_fsrs_next_review_date: next.fsrs_next_review_date,
-    p_mastery_delta: masteryDelta,
+    p_observed: observed,
+    p_learning_rate: learningRate,
   })
 
   if (rpcError) {

@@ -37,7 +37,79 @@ delete from public.assignments a using public.assignments b
 create unique index if not exists assignments_user_course_name_due_uniq
   on public.assignments (user_id, course_id, name, due_date);
 
--- PostgREST must see the new unique indexes before upsert-on-conflict works.
+-- ── F3: unified mastery model — review_card_atomic takes evidence ────────────
+-- (observed level + learning rate, EWMA) instead of an additive delta, so all
+-- three mastery writers (tutor / quiz / flashcards) move the score on ONE scale.
+-- Also writes the previously-dead confidence column.
+drop function if exists public.review_card_atomic(
+  uuid, uuid, numeric, numeric, integer, integer, text, timestamptz, date, numeric
+);
+
+create or replace function public.review_card_atomic(
+  p_card_id uuid,
+  p_user_id uuid,
+  p_fsrs_stability numeric,
+  p_fsrs_difficulty numeric,
+  p_fsrs_reps integer,
+  p_fsrs_lapses integer,
+  p_fsrs_state text,
+  p_fsrs_last_review timestamptz,
+  p_fsrs_next_review_date date,
+  p_observed numeric,
+  p_learning_rate numeric
+) returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_topic_id uuid;
+begin
+  update public.flashcards
+  set fsrs_stability = p_fsrs_stability,
+      fsrs_difficulty = p_fsrs_difficulty,
+      fsrs_reps = p_fsrs_reps,
+      fsrs_lapses = p_fsrs_lapses,
+      fsrs_state = p_fsrs_state,
+      fsrs_last_review = p_fsrs_last_review,
+      fsrs_next_review_date = p_fsrs_next_review_date
+  where card_id = p_card_id
+    and user_id = p_user_id
+  returning topic_id into v_topic_id;
+
+  if not found then
+    raise exception 'card not found or not owned by user';
+  end if;
+
+  if v_topic_id is not null then
+    insert into public.topic_mastery (user_id, topic_id, mastery_score, confidence, last_updated)
+    values (p_user_id, v_topic_id, greatest(0, least(1, p_observed)), 0.05, now())
+    on conflict (user_id, topic_id) do update
+      set mastery_score = greatest(0, least(1,
+            coalesce(public.topic_mastery.mastery_score, 0)
+            + greatest(0, least(1, p_learning_rate))
+              * (greatest(0, least(1, p_observed)) - coalesce(public.topic_mastery.mastery_score, 0)))),
+          confidence = least(1, coalesce(public.topic_mastery.confidence, 0) + 0.05),
+          last_updated = now();
+
+    insert into public.mastery_history (user_id, topic_id, mastery_score)
+    select user_id, topic_id, mastery_score
+    from public.topic_mastery
+    where user_id = p_user_id
+      and topic_id = v_topic_id;
+  end if;
+end;
+$$;
+
+-- service_role ONLY (was also granted to authenticated): SECURITY DEFINER +
+-- p_user_id parameter meant any logged-in user could replay it against another
+-- user's card. Only the server route (service client) calls it.
+grant execute on function public.review_card_atomic(
+  uuid, uuid, numeric, numeric, integer, integer, text, timestamptz, date, numeric, numeric
+) to service_role;
+
+-- PostgREST must see the new unique indexes + function signature before the
+-- app's upsert-on-conflict / RPC calls work.
 notify pgrst, 'reload schema';
 
 -- Confirm
