@@ -33,12 +33,17 @@ type ExtractedAssignment = {
   topics: string[]         // topic names this assignment covers (best-effort)
 }
 
+type ExtractedPrereq = {
+  topic: string            // topic that depends on another
+  requires: string         // the prerequisite topic
+}
+
 async function extractTopicsAndExams(
   client: Anthropic,
   courseName: string,
   syllabusText: string,
   existingTopicNames: string[] = []
-): Promise<{ topics: ExtractedTopic[]; exams: ExtractedExam[]; assignments: ExtractedAssignment[] }> {
+): Promise<{ topics: ExtractedTopic[]; exams: ExtractedExam[]; assignments: ExtractedAssignment[]; prerequisites: ExtractedPrereq[] }> {
   const currentYear = new Date().getFullYear()
 
   const message = await client.messages.create({
@@ -80,10 +85,16 @@ For assignments (problem sets, homework, projects, papers with a DUE DATE):
 Syllabus:
 ${syllabusText.slice(0, SYLLABUS_EXTRACT_BUDGET)}
 
+For prerequisites (which topics build on which):
+- Syllabi are ordered for a reason — when topic B clearly builds on topic A (derivatives→chain rule, limits→derivatives), record it
+- ONLY use topic names from your extracted list (or the already-tracked list above)
+- Only include CLEAR dependencies; an empty list is fine
+
 Respond with exactly:
 {"topics":[{"name":"...","syllabus_order":1,"professor_weight":0.7},...],
 "exams":[{"date":"2025-10-15","grade_weight":25,"duration_minutes":75,"topics":["Topic A","Topic B"]},...],
-"assignments":[{"name":"Problem Set 1","due_date":"2025-09-12","topics":["Topic A"]},...]}`,
+"assignments":[{"name":"Problem Set 1","due_date":"2025-09-12","topics":["Topic A"]},...],
+"prerequisites":[{"topic":"Topic B","requires":"Topic A"},...]}`,
       },
     ],
   })
@@ -123,10 +134,18 @@ Respond with exactly:
             topics: Array.isArray(a.topics) ? a.topics : [],
           }))
       : []
-    return { topics, exams, assignments }
+    const prerequisites: ExtractedPrereq[] = Array.isArray(parsed.prerequisites)
+      ? parsed.prerequisites
+          .filter((p: { topic?: string; requires?: string }) =>
+            typeof p.topic === 'string' && p.topic.trim().length > 0 &&
+            typeof p.requires === 'string' && p.requires.trim().length > 0 &&
+            p.topic.trim().toLowerCase() !== p.requires.trim().toLowerCase())
+          .map((p: { topic: string; requires: string }) => ({ topic: p.topic.trim(), requires: p.requires.trim() }))
+      : []
+    return { topics, exams, assignments, prerequisites }
   } catch (e) {
     console.error('[profiler] JSON parse failed. Raw response was:\n---\n' + raw.slice(0, 500) + '\n---', e)
-    return { topics: [], exams: [], assignments: [] }
+    return { topics: [], exams: [], assignments: [], prerequisites: [] }
   }
 }
 
@@ -375,6 +394,8 @@ export async function runProfiler(
   const namesSoFar = [...existingTopicNames]
   const seenExamDates = new Set<string>()
   const seenAssignmentKeys = new Set<string>()
+  const extractedPrereqs: ExtractedPrereq[] = []
+  const seenPrereqKeys = new Set<string>()
   try {
     for (const window of windows) {
       // withRetry (R1): a transient 529/overload previously made the profiler
@@ -400,6 +421,13 @@ export async function runProfiler(
         if (!seenAssignmentKeys.has(key)) {
           seenAssignmentKeys.add(key)
           extractedAssignments.push(a)
+        }
+      }
+      for (const p of result.prerequisites) {
+        const key = `${p.topic.toLowerCase()}->${p.requires.toLowerCase()}`
+        if (!seenPrereqKeys.has(key)) {
+          seenPrereqKeys.add(key)
+          extractedPrereqs.push(p)
         }
       }
     }
@@ -470,6 +498,27 @@ export async function runProfiler(
         })),
         { onConflict: 'user_id,topic_id', ignoreDuplicates: true }
       )
+    }
+  }
+
+  // I5: persist the prerequisite edges (topic names → ids over existing +
+  // freshly-inserted topics). Drives "fix the foundation first" in the tutor
+  // and a scheduler boost for weak prerequisites.
+  if (extractedPrereqs.length > 0) {
+    const resolvable = [
+      ...(existingTopics ?? []),
+      ...insertedTopics,
+    ] as { topic_id: string; name: string }[]
+    const byName = new Map(resolvable.map(t => [t.name.toLowerCase(), t.topic_id]))
+    const edges = extractedPrereqs
+      .map(p => ({ topic_id: byName.get(p.topic.toLowerCase()), prereq_topic_id: byName.get(p.requires.toLowerCase()) }))
+      .filter((e): e is { topic_id: string; prereq_topic_id: string } => !!e.topic_id && !!e.prereq_topic_id && e.topic_id !== e.prereq_topic_id)
+      .map(e => ({ ...e, user_id: userId, course_id: courseId }))
+    if (edges.length > 0) {
+      const { error: prereqError } = await service
+        .from('topic_prerequisites')
+        .upsert(edges, { onConflict: 'topic_id,prereq_topic_id', ignoreDuplicates: true })
+      if (prereqError) console.error(`${tag} prerequisite insert failed`, prereqError)
     }
   }
 

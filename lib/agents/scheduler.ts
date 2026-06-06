@@ -242,6 +242,28 @@ export async function runScheduler(userId: string): Promise<void> {
     dueCardsByCourse.set(c.course_id, arr)
   }
 
+  // M8: what the tutor learned changes the PLAN, not just the chat — topics
+  // with a recently-seen recorded misconception get a deficit boost.
+  const thirtyDaysAgo = new Date(Date.now() - 30 * 86_400_000).toISOString()
+  const { data: misconceptions } = await service
+    .from('student_memory')
+    .select('topic_id')
+    .eq('user_id', userId)
+    .eq('kind', 'misconception')
+    .not('topic_id', 'is', null)
+    .gte('last_seen', thirtyDaysAgo)
+  const misconceptionTopicIds = new Set(
+    ((misconceptions ?? []) as { topic_id: string }[]).map(m => m.topic_id)
+  )
+
+  // I5: a weak topic that other topics BUILD ON outranks an equally-weak leaf —
+  // fixing the foundation unblocks everything downstream.
+  const { data: prereqEdges } = await service
+    .from('topic_prerequisites')
+    .select('prereq_topic_id')
+    .eq('user_id', userId)
+  const prereqIds = new Set(((prereqEdges ?? []) as { prereq_topic_id: string }[]).map(e => e.prereq_topic_id))
+
   for (const course of courses) {
     // I3: proximity × grade weight — a near 40% final pulls far more session
     // minutes toward its course than a near 5% quiz.
@@ -259,8 +281,13 @@ export async function runScheduler(userId: string): Promise<void> {
     for (const topic of topics) {
       const pw = Number(topic.professor_weight ?? 0.5)
       const ms = masteryMap[topic.topic_id] ?? 0
-      const deficit = Math.max(0, pw - ms)
-      totalPriority += deficit * pw * multiplier
+      let deficit = Math.max(0, pw - ms)
+      // M8: a recorded recurring misconception is a real gap mastery may not
+      // capture yet.
+      if (misconceptionTopicIds.has(topic.topic_id)) deficit = Math.min(1, deficit + 0.15)
+      // I5: weak prerequisites of other topics get priority — fix foundations first.
+      const prereqBoost = prereqIds.has(topic.topic_id) && ms < 0.4 ? 1.3 : 1
+      totalPriority += deficit * pw * multiplier * prereqBoost
       totalMastery += ms
       if (pw >= 0.5 && (weakestTopic === null || ms < weakestTopic.mastery)) {
         weakestTopic = { name: topic.name, mastery: ms }

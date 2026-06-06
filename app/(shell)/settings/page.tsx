@@ -14,6 +14,7 @@ import { AppearancePicker } from './_appearance'
 import { AccountSection } from './_account'
 import { KnowledgeStore } from './_knowledge-store'
 import { ConnectClaude } from './_connect-claude'
+import { MemoryCenter } from './_memory'
 import { CheckCircle, XCircle } from '@phosphor-icons/react/dist/ssr'
 
 export const dynamic = 'force-dynamic'
@@ -177,6 +178,9 @@ export default async function SettingsPage() {
             </>
           )}
         </section>
+
+        {/* Tutor memory (M7) */}
+        <MemoryCenter />
 
         {/* Knowledge Store */}
         <KnowledgeStore files={wikiFilesWithContent} professorMap={professorMap} />

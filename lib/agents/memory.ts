@@ -68,8 +68,12 @@ type Distilled = {
   preferences: string[]
   topic_names: string[]
   topic_signals: { topic_name: string; signal: 'understood' | 'struggled' }[]
+  memories: { kind: 'preference' | 'misconception' | 'goal'; content: string; topic_name?: string }[]
   updated_digest: string
 }
+
+const MEMORY_KINDS = new Set(['preference', 'misconception', 'goal'])
+const MAX_MEMORIES_PER_COURSE = 30
 
 // Exported for unit tests.
 export function parseDistilled(raw: string): Distilled | null {
@@ -85,6 +89,16 @@ export function parseDistilled(raw: string): Distilled | null {
           .slice(0, 10)
           .map(s => ({ topic_name: s.topic_name as string, signal: s.signal as 'understood' | 'struggled' }))
       : []
+    const memories = Array.isArray(p.memories)
+      ? (p.memories as { kind?: unknown; content?: unknown; topic_name?: unknown }[])
+          .filter(m => typeof m?.kind === 'string' && MEMORY_KINDS.has(m.kind) && typeof m?.content === 'string' && (m.content as string).trim().length > 0)
+          .slice(0, 6)
+          .map(m => ({
+            kind: m.kind as 'preference' | 'misconception' | 'goal',
+            content: (m.content as string).trim().slice(0, 400),
+            topic_name: typeof m.topic_name === 'string' ? m.topic_name : undefined,
+          }))
+      : []
     return {
       summary: p.summary.trim().slice(0, 1200),
       confusions: arr(p.confusions),
@@ -92,6 +106,7 @@ export function parseDistilled(raw: string): Distilled | null {
       preferences: arr(p.preferences),
       topic_names: arr(p.topic_names),
       topic_signals: signals,
+      memories,
       updated_digest: typeof p.updated_digest === 'string' ? p.updated_digest.trim().slice(0, DIGEST_CHAR_BUDGET) : '',
     }
   } catch {
@@ -137,11 +152,16 @@ export async function distillSession(userId: string, sessionId: string): Promise
   const apiKey = await getUserApiKey(userId)
   if (!apiKey) return false
 
-  const [{ data: courseTopics }, oldMemory, { data: course }] = await Promise.all([
+  const [{ data: courseTopics }, oldMemory, { data: course }, { data: userRow }] = await Promise.all([
     service.from('topics').select('topic_id, name').eq('course_id', session.course_id).eq('user_id', userId),
     getCourseMemory(userId, session.course_id),
     service.from('courses').select('name').eq('course_id', session.course_id).eq('user_id', userId).maybeSingle(),
+    service.from('users').select('memory_paused').eq('user_id', userId).maybeSingle(),
   ])
+
+  // M7: the student paused memory — write nothing new (existing memory stays
+  // until they delete it).
+  if (userRow?.memory_paused === true) return false
 
   const client = new Anthropic({ apiKey })
   const response = await withRetry(() => client.messages.create({
@@ -164,10 +184,13 @@ Return ONLY valid JSON (no markdown fences):
   "preferences": ["explicitly stated study/explanation preferences, if any", ...],
   "topic_names": ["course topic names touched in this session", ...],
   "topic_signals": [{"topic_name": "course topic name", "signal": "understood" | "struggled"}, ...],
+  "memories": [{"kind": "preference" | "misconception" | "goal", "content": "one durable, specific fact", "topic_name": "course topic if applicable"}, ...],
   "updated_digest": "the NEW rolling course memory: merge the existing memory with this session. A running narrative of what's been covered across all sessions, persistent confusions (drop ones now resolved), and stable preferences. Write in compact prose + short bullets. HARD LIMIT ~600 words — compress older history harder than recent."
 }
 
 topic_signals rules: only include a topic when the transcript shows CLEAR evidence — the student demonstrably explained/answered it correctly ("understood") or demonstrably got it wrong / said they're lost ("struggled"). Mere exposure is NOT a signal; omit when unsure.
+
+memories rules: durable facts only, the kind worth knowing NEXT month — a recurring misconception ("applies chain rule as product rule"), a stated preference ("wants worked examples first"), a concrete goal ("aiming for an A; final worth 40%"). NOT session events. Empty array is the right answer for most sessions.
 
 Rules: be specific and factual — only what the transcript supports. Empty arrays are fine. No advice, no filler.`,
     }],
@@ -222,6 +245,46 @@ Rules: be specific and factual — only what the transcript supports. Empty arra
       digest: distilled.updated_digest.slice(0, DIGEST_CHAR_BUDGET),
       updated_at: new Date().toISOString(),
     }, { onConflict: 'user_id,course_id' })
+  }
+
+  // M3: typed, machine-readable facts (vs. the prose digest) — what the
+  // scheduler boosts on (M8) and what the student can edit/delete (M7).
+  // Exact-content repeats bump last_seen instead of duplicating.
+  for (const mem of distilled.memories) {
+    const topicId = mem.topic_name
+      ? resolveTopicByName(mem.topic_name, (courseTopics ?? []) as { topic_id: string; name: string }[])
+      : null
+    const { data: existingMem } = await service
+      .from('student_memory')
+      .select('memory_id')
+      .eq('user_id', userId)
+      .eq('course_id', session.course_id)
+      .eq('kind', mem.kind)
+      .eq('content', mem.content)
+      .maybeSingle()
+    if (existingMem) {
+      await service.from('student_memory').update({ last_seen: new Date().toISOString() }).eq('memory_id', existingMem.memory_id)
+    } else {
+      await service.from('student_memory').insert({
+        user_id: userId,
+        course_id: session.course_id,
+        topic_id: topicId,
+        kind: mem.kind,
+        content: mem.content,
+        source_session_id: sessionId,
+      })
+    }
+  }
+  // Bound growth: keep the most recently seen N per course.
+  const { data: allMems } = await service
+    .from('student_memory')
+    .select('memory_id')
+    .eq('user_id', userId)
+    .eq('course_id', session.course_id)
+    .order('last_seen', { ascending: false })
+  if ((allMems ?? []).length > MAX_MEMORIES_PER_COURSE) {
+    const excess = (allMems ?? []).slice(MAX_MEMORIES_PER_COURSE).map((m: { memory_id: string }) => m.memory_id)
+    await service.from('student_memory').delete().in('memory_id', excess)
   }
 
   // I2: the conversation IS learning evidence. Clear demonstrations of

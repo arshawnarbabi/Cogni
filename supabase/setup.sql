@@ -1670,3 +1670,50 @@ alter table public.jobs add constraint jobs_kind_check
   check (kind in ('profile', 'embed', 'flashcards', 'distill'));
 
 notify pgrst, 'reload schema';
+
+-- ======================================================================
+-- Section 14: Structured student memory (M3) + prerequisite graph (I5)
+-- ======================================================================
+-- Typed, machine-readable facts about the student (vs. the prose digest in
+-- course_memory): preferences, recurring misconceptions, goals. Written by the
+-- session distiller; consumed by the scheduler (misconception boosts, M8) and
+-- editable/deletable by the student in Settings (M7).
+create table if not exists public.student_memory (
+  memory_id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references public.users(user_id) on delete cascade,
+  course_id uuid references public.courses(course_id) on delete cascade,
+  topic_id uuid references public.topics(topic_id) on delete cascade,
+  kind text not null check (kind in ('preference', 'misconception', 'goal', 'fact')),
+  content text not null,
+  source_session_id uuid references public.session_log(session_id) on delete set null,
+  last_seen timestamptz not null default now(),
+  created_at timestamptz not null default now()
+);
+alter table public.student_memory enable row level security;
+drop policy if exists "student_memory: own rows only" on public.student_memory;
+create policy "student_memory: own rows only" on public.student_memory
+  for select using (auth.uid() = user_id);
+create index if not exists idx_student_memory_user_course on public.student_memory(user_id, course_id, last_seen);
+
+-- Memory pause (M7): when true, the distiller stops writing new memory
+-- (existing memory is kept until the user deletes it).
+alter table public.users add column if not exists memory_paused boolean not null default false;
+
+-- Prerequisite edges between topics (I5): extracted by the profiler from the
+-- syllabus ordering/structure. Drives "your prereq is weak" remediation in the
+-- tutor and a scheduler boost for weak prerequisites of upcoming work.
+create table if not exists public.topic_prerequisites (
+  topic_id uuid not null references public.topics(topic_id) on delete cascade,
+  prereq_topic_id uuid not null references public.topics(topic_id) on delete cascade,
+  user_id uuid not null references public.users(user_id) on delete cascade,
+  course_id uuid not null references public.courses(course_id) on delete cascade,
+  created_at timestamptz not null default now(),
+  primary key (topic_id, prereq_topic_id)
+);
+alter table public.topic_prerequisites enable row level security;
+drop policy if exists "topic_prerequisites: own rows only" on public.topic_prerequisites;
+create policy "topic_prerequisites: own rows only" on public.topic_prerequisites
+  for select using (auth.uid() = user_id);
+create index if not exists idx_topic_prereq_user_course on public.topic_prerequisites(user_id, course_id);
+
+notify pgrst, 'reload schema';

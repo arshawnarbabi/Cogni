@@ -72,10 +72,11 @@ export async function buildTutorSystemPrompt(
 ): Promise<{ static: string; rag: string; dynamic: string }> {
   const service = createServiceClient()
 
-  const [learningProfile, professorWiki, courseMemory] = await Promise.all([
+  const [learningProfile, professorWiki, courseMemory, prereqResult] = await Promise.all([
     readWikiFile(userId, 'learning_profile.md'),
     opts?.professorId ? readWikiFile(userId, `professor_${opts.professorId}.md`) : Promise.resolve(null),
     getCourseMemory(userId, courseId).catch(() => null),
+    service.from('topic_prerequisites').select('topic_id, prereq_topic_id').eq('user_id', userId).eq('course_id', courseId),
   ])
 
   // I1: rank by EFFECTIVE (time-decayed) mastery — a topic "mastered" weeks ago
@@ -84,20 +85,40 @@ export async function buildTutorSystemPrompt(
   // stored score would miss exactly the stale-high topics decay exists to catch.
   const { data: mastery } = await service
     .from('topic_mastery')
-    .select('mastery_score, last_updated, topics(name)')
+    .select('mastery_score, last_updated, topics(topic_id, name)')
     .eq('user_id', userId)
 
-  const weakTopics = (mastery ?? [])
-    .map((m: { mastery_score: number | null; last_updated: string | null; topics: { name: string } | null }) => {
-      const topic = m.topics
-      if (!topic) return null
-      return { name: topic.name, eff: effectiveMastery(m.mastery_score, m.last_updated) }
-    })
-    .filter((t: { name: string; eff: number } | null): t is { name: string; eff: number } => t !== null)
-    .sort((a: { eff: number }, b: { eff: number }) => a.eff - b.eff)
+  type MasteryRow = { mastery_score: number | null; last_updated: string | null; topics: { topic_id: string; name: string } | null }
+  const effByTopicId = new Map<string, { name: string; eff: number }>()
+  for (const m of (mastery ?? []) as MasteryRow[]) {
+    if (m.topics) {
+      effByTopicId.set(m.topics.topic_id, { name: m.topics.name, eff: effectiveMastery(m.mastery_score, m.last_updated) })
+    }
+  }
+
+  const weakTopics = [...effByTopicId.values()]
+    .sort((a, b) => a.eff - b.eff)
     .slice(0, 10)
-    .map((t: { name: string; eff: number }) => `- ${t.name} (${Math.round(t.eff * 100)}%)`)
+    .map(t => `- ${t.name} (${Math.round(t.eff * 100)}%)`)
     .join('\n')
+
+  // I5: prerequisite gaps — topics in THIS course whose foundation is weak.
+  // "You're stuck on integration by parts because your derivatives are at 30%"
+  // is the remediation a real tutor gives.
+  const prereqGaps = ((prereqResult.data ?? []) as { topic_id: string; prereq_topic_id: string }[])
+    .map(edge => {
+      const dependent = effByTopicId.get(edge.topic_id)
+      const prereq = effByTopicId.get(edge.prereq_topic_id)
+      if (!dependent || !prereq || prereq.eff >= 0.35) return null
+      return `- "${dependent.name}" builds on "${prereq.name}" — and ${prereq.name} is only at ${Math.round(prereq.eff * 100)}%`
+    })
+    .filter(Boolean)
+    .slice(0, 5)
+    .join('\n')
+
+  const prereqSection = prereqGaps
+    ? `\n## Prerequisite gaps\nWhen the student struggles with a dependent topic below, check whether the real problem is its weak foundation — and offer to shore that up FIRST:\n${prereqGaps}`
+    : ''
 
   const verificationSection = mode !== 'answer' ? `
 ## Verification questions
@@ -204,6 +225,7 @@ ${MODE_INSTRUCTIONS[mode]}
 ${clampBlock('learning_profile', learningProfile)}
 ${weakTopics ? `\nCurrent weak areas:\n${clampBlock('weak_topics', weakTopics)}` : ''}
 ${memorySection}
+${prereqSection}
 ${professorSection}
 ${clampBlock('topics_list', topicsSection)}
 ${verificationSection}
