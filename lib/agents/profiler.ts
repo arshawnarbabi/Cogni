@@ -358,23 +358,55 @@ export async function runProfiler(
     .eq('user_id', userId)
   const existingTopicNames: string[] = (existingTopics ?? []).map((t: { name: string }) => t.name)
 
-  let extractedTopics: ExtractedTopic[] = []
-  let extractedExams: ExtractedExam[] = []
-  let extractedAssignments: ExtractedAssignment[] = []
+  const extractedTopics: ExtractedTopic[] = []
+  const extractedExams: ExtractedExam[] = []
+  const extractedAssignments: ExtractedAssignment[] = []
 
+  // I6: process the WHOLE syllabus in windows (up to 3 × budget ≈ 144k chars)
+  // instead of one truncated slice — syllabi are chronological, so truncation
+  // dropped exactly the late-semester exams/assignments the scheduler most
+  // needs. Each window sees the topic names accumulated so far for dedup.
+  const windows: string[] = []
+  const STEP = SYLLABUS_EXTRACT_BUDGET - 2000 // overlap so a row split across windows isn't lost
+  for (let i = 0; i < syllabusText.length && windows.length < 3; i += STEP) {
+    windows.push(syllabusText.slice(i, i + SYLLABUS_EXTRACT_BUDGET))
+  }
+
+  const namesSoFar = [...existingTopicNames]
+  const seenExamDates = new Set<string>()
+  const seenAssignmentKeys = new Set<string>()
   try {
-    // withRetry (R1): a transient 529/overload previously made the profiler
-    // "succeed" with zero topics; also records key health on auth failures (R5).
-    const result = await withRetry(
-      () => extractTopicsAndExams(client, courseName, syllabusText, existingTopicNames),
-      { label: 'profiler.extract', keyHealth: { userId, provider: 'anthropic' } },
-    )
-    extractedTopics = result.topics
-    extractedExams = result.exams
-    extractedAssignments = result.assignments
+    for (const window of windows) {
+      // withRetry (R1): a transient 529/overload previously made the profiler
+      // "succeed" with zero topics; also records key health on auth failures (R5).
+      const result = await withRetry(
+        () => extractTopicsAndExams(client, courseName, window, namesSoFar),
+        { label: 'profiler.extract', keyHealth: { userId, provider: 'anthropic' } },
+      )
+      for (const t of result.topics) {
+        if (!namesSoFar.some(n => n.toLowerCase() === t.name.toLowerCase())) {
+          extractedTopics.push(t)
+          namesSoFar.push(t.name)
+        }
+      }
+      for (const e of result.exams) {
+        if (!seenExamDates.has(e.date)) {
+          seenExamDates.add(e.date)
+          extractedExams.push(e)
+        }
+      }
+      for (const a of result.assignments) {
+        const key = `${a.name.toLowerCase()}|${a.due_date}`
+        if (!seenAssignmentKeys.has(key)) {
+          seenAssignmentKeys.add(key)
+          extractedAssignments.push(a)
+        }
+      }
+    }
   } catch (e) {
     console.error(`${tag} Claude call failed`, e)
-    return
+    if (extractedTopics.length === 0) return // nothing extracted at all — give up
+    // Partial extraction (a later window failed): proceed with what we have.
   }
 
   // Dedupe against existing topics (now a safety net — the extractor reuses existing

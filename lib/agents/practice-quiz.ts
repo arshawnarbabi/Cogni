@@ -3,6 +3,8 @@ import { getUserApiKey } from '@/lib/vault'
 import { readWikiFile } from '@/lib/wiki'
 import { applyMasteryEvidence, resolveTopicByName, effectiveMastery } from '@/lib/mastery'
 import { withRetry } from '@/lib/ai/call'
+import { newCardDefaults } from '@/lib/fsrs'
+import { assignNewCardDueDates } from '@/lib/agents/flashcard'
 import Anthropic from '@anthropic-ai/sdk'
 
 export type QuizFormat = 'mc' | 'short_answer' | 'mixed'
@@ -389,6 +391,48 @@ Return ONLY a JSON array with exactly ${shortAnswerIdx.length} objects, one per 
     } catch (e) {
       console.error('[practice-quiz] mastery evidence write failed', e)
     }
+  }
+
+  // I8: every missed question becomes a flashcard — a card built from a
+  // demonstrated gap targets exactly what the student doesn't know, and it's
+  // near-free (the question + explanation were already generated). Recall form:
+  // front = the question (no options), back = answer + explanation. Paced
+  // through the normal new-card budget and deduped against existing fronts.
+  try {
+    const missed = results.filter(r => !r.correct && r.question.question?.trim() && r.question.answer?.trim())
+    if (missed.length > 0) {
+      const fronts = missed.map(r => r.question.question.trim())
+      const { data: existingCards } = await service
+        .from('flashcards')
+        .select('front')
+        .eq('user_id', userId)
+        .eq('course_id', courseId)
+        .in('front', fronts)
+      const existingFronts = new Set(((existingCards ?? []) as { front: string }[]).map(c => c.front))
+
+      const newOnes = missed.filter(r => !existingFronts.has(r.question.question.trim())).slice(0, 8)
+      if (newOnes.length > 0) {
+        const { data: tzRow } = await service.from('users').select('timezone').eq('user_id', userId).maybeSingle()
+        const dueDates = await assignNewCardDueDates(service, userId, newOnes.length, tzRow?.timezone ?? 'UTC')
+        const defaults = newCardDefaults()
+        const topicRowsForCards = (courseTopics ?? []) as { topic_id: string; name: string }[]
+        const { error: cardError } = await service.from('flashcards').insert(
+          newOnes.map((r, i) => ({
+            user_id: userId,
+            course_id: courseId,
+            topic_id: r.question.topic_name ? resolveTopicByName(r.question.topic_name, topicRowsForCards) : null,
+            front: r.question.question.trim(),
+            back: `${r.question.answer.trim()}${r.question.explanation ? `\n\n${r.question.explanation.trim()}` : ''}`.slice(0, 2000),
+            hint: null,
+            ...defaults,
+            fsrs_next_review_date: dueDates[i],
+          }))
+        )
+        if (cardError) console.error('[practice-quiz] missed-question cards insert failed', cardError)
+      }
+    }
+  } catch (e) {
+    console.error('[practice-quiz] missed-question card generation failed (non-fatal)', e)
   }
 
   // Write result record
