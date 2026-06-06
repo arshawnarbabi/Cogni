@@ -1781,3 +1781,65 @@ create policy "usage_events: own rows only" on public.usage_events
 create index if not exists idx_usage_events_user_created on public.usage_events(user_id, created_at);
 
 notify pgrst, 'reload schema';
+
+-- ======================================================================
+-- Section 18: Grade tracking (S1) + LMS/Canvas connections (S5)
+-- ======================================================================
+-- The grading scheme per course (category weights), seeded by the profiler
+-- from the syllabus and editable by the student.
+create table if not exists public.course_grade_schemes (
+  scheme_id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references public.users(user_id) on delete cascade,
+  course_id uuid not null references public.courses(course_id) on delete cascade,
+  category text not null,
+  weight_pct numeric(5,2) not null check (weight_pct >= 0 and weight_pct <= 100),
+  created_at timestamptz not null default now(),
+  unique (user_id, course_id, category)
+);
+alter table public.course_grade_schemes enable row level security;
+drop policy if exists "course_grade_schemes: own rows only" on public.course_grade_schemes;
+create policy "course_grade_schemes: own rows only" on public.course_grade_schemes
+  for select using (auth.uid() = user_id);
+
+-- Individual graded items (manual entry or Canvas-synced). external_id carries
+-- the Canvas assignment id so re-syncs update instead of duplicating.
+create table if not exists public.grade_items (
+  item_id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references public.users(user_id) on delete cascade,
+  course_id uuid not null references public.courses(course_id) on delete cascade,
+  category text,
+  name text not null,
+  points_earned numeric(8,2),
+  points_possible numeric(8,2) not null check (points_possible > 0),
+  graded_at timestamptz not null default now(),
+  source text not null default 'manual' check (source in ('manual', 'canvas', 'exam')),
+  external_id text,
+  created_at timestamptz not null default now()
+);
+alter table public.grade_items enable row level security;
+drop policy if exists "grade_items: own rows only" on public.grade_items;
+create policy "grade_items: own rows only" on public.grade_items
+  for select using (auth.uid() = user_id);
+create index if not exists idx_grade_items_user_course on public.grade_items(user_id, course_id);
+-- One row per Canvas assignment per course (re-sync upserts on this).
+create unique index if not exists grade_items_external_uniq
+  on public.grade_items(user_id, course_id, external_id) where external_id is not null;
+
+-- Canvas connection (S5): one per user. The access token itself lives in the
+-- Vault (user_keys secret 'canvas_token'), never in a table column.
+create table if not exists public.lms_connections (
+  user_id uuid primary key references public.users(user_id) on delete cascade,
+  provider text not null default 'canvas' check (provider in ('canvas')),
+  base_url text not null,
+  last_synced_at timestamptz,
+  created_at timestamptz not null default now()
+);
+alter table public.lms_connections enable row level security;
+drop policy if exists "lms_connections: own rows only" on public.lms_connections;
+create policy "lms_connections: own rows only" on public.lms_connections
+  for select using (auth.uid() = user_id);
+
+-- Map Cogni courses to Canvas courses for sync.
+alter table public.courses add column if not exists lms_course_id text;
+
+notify pgrst, 'reload schema';

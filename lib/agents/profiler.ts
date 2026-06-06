@@ -6,7 +6,7 @@ import { retrieveChunks, processEmbeddings } from '@/lib/rag'
 import { requireOwnedCourse } from '@/lib/authz'
 import { extractText, buildVisualBlock, extractContentFromVision } from '@/lib/extract-text'
 import { withRetry } from '@/lib/ai/call'
-import { effectiveMastery } from '@/lib/mastery'
+import { effectiveMastery, carryoverSeed } from '@/lib/mastery'
 import { recordUsage } from '@/lib/usage'
 
 // Character budgets for syllabus prompts. Previously 12k/10k chars, which silently
@@ -40,13 +40,18 @@ type ExtractedPrereq = {
   requires: string         // the prerequisite topic
 }
 
+type ExtractedGradeCategory = {
+  category: string         // e.g. "Exams", "Homework", "Participation"
+  weight_pct: number       // 0–100, should roughly sum to 100
+}
+
 async function extractTopicsAndExams(
   client: Anthropic,
   userId: string,
   courseName: string,
   syllabusText: string,
   existingTopicNames: string[] = []
-): Promise<{ topics: ExtractedTopic[]; exams: ExtractedExam[]; assignments: ExtractedAssignment[]; prerequisites: ExtractedPrereq[] }> {
+): Promise<{ topics: ExtractedTopic[]; exams: ExtractedExam[]; assignments: ExtractedAssignment[]; prerequisites: ExtractedPrereq[]; grading_scheme: ExtractedGradeCategory[] }> {
   const currentYear = new Date().getFullYear()
 
   const message = await client.messages.create({
@@ -93,11 +98,16 @@ For prerequisites (which topics build on which):
 - ONLY use topic names from your extracted list (or the already-tracked list above)
 - Only include CLEAR dependencies; an empty list is fine
 
+For grading_scheme (the course grade breakdown):
+- ONLY what the syllabus explicitly states (e.g. "Exams 50%, Homework 30%, Participation 20%")
+- weight_pct values should sum to ~100; an empty list if no breakdown is stated
+
 Respond with exactly:
 {"topics":[{"name":"...","syllabus_order":1,"professor_weight":0.7},...],
 "exams":[{"date":"2025-10-15","grade_weight":25,"duration_minutes":75,"topics":["Topic A","Topic B"]},...],
 "assignments":[{"name":"Problem Set 1","due_date":"2025-09-12","topics":["Topic A"]},...],
-"prerequisites":[{"topic":"Topic B","requires":"Topic A"},...]}`,
+"prerequisites":[{"topic":"Topic B","requires":"Topic A"},...],
+"grading_scheme":[{"category":"Exams","weight_pct":50},...]}`,
       },
     ],
   })
@@ -147,10 +157,21 @@ Respond with exactly:
             p.topic.trim().toLowerCase() !== p.requires.trim().toLowerCase())
           .map((p: { topic: string; requires: string }) => ({ topic: p.topic.trim(), requires: p.requires.trim() }))
       : []
-    return { topics, exams, assignments, prerequisites }
+    const grading_scheme: ExtractedGradeCategory[] = Array.isArray(parsed.grading_scheme)
+      ? parsed.grading_scheme
+          .filter((g: { category?: string; weight_pct?: number }) =>
+            typeof g.category === 'string' && g.category.trim().length > 0 &&
+            typeof g.weight_pct === 'number' && g.weight_pct > 0 && g.weight_pct <= 100)
+          .map((g: { category: string; weight_pct: number }) => ({
+            category: g.category.trim().slice(0, 80),
+            weight_pct: Math.round(g.weight_pct * 100) / 100,
+          }))
+          .slice(0, 12)
+      : []
+    return { topics, exams, assignments, prerequisites, grading_scheme }
   } catch (e) {
     console.error('[profiler] JSON parse failed. Raw response was:\n---\n' + raw.slice(0, 500) + '\n---', e)
-    return { topics: [], exams: [], assignments: [], prerequisites: [] }
+    return { topics: [], exams: [], assignments: [], prerequisites: [], grading_scheme: [] }
   }
 }
 
@@ -434,6 +455,7 @@ export async function runProfiler(
   const seenAssignmentKeys = new Set<string>()
   const extractedPrereqs: ExtractedPrereq[] = []
   const seenPrereqKeys = new Set<string>()
+  let extractedScheme: ExtractedGradeCategory[] = []
   // Every model-emitted weight, INCLUDING for already-tracked topics — the
   // dedup filter below excludes existing topics from extractedTopics, so the
   // weight-refresh step must read from here or re-runs never update weights.
@@ -477,6 +499,10 @@ export async function runProfiler(
           extractedPrereqs.push(p)
         }
       }
+      // Grading scheme usually lives on page 1 — keep the first non-empty one.
+      if (extractedScheme.length === 0 && result.grading_scheme.length > 0) {
+        extractedScheme = result.grading_scheme
+      }
     }
   } catch (e) {
     console.error(`${tag} Claude call failed`, e)
@@ -506,6 +532,24 @@ export async function runProfiler(
           .eq('user_id', userId)
       )
     )
+  }
+
+  // S1: persist the grading scheme (category weights) so the grade tracker can
+  // compute "what do I need on the final". Upsert: a syllabus re-upload
+  // refreshes weights without duplicating categories.
+  if (extractedScheme.length > 0) {
+    const { error: schemeError } = await service
+      .from('course_grade_schemes')
+      .upsert(
+        extractedScheme.map(g => ({
+          user_id: userId,
+          course_id: courseId,
+          category: g.category,
+          weight_pct: g.weight_pct,
+        })),
+        { onConflict: 'user_id,course_id,category' }
+      )
+    if (schemeError) console.error(`${tag} grade scheme upsert failed`, schemeError)
   }
 
   let insertedTopics: { topic_id: string; name: string }[] = []
@@ -538,15 +582,35 @@ export async function runProfiler(
     insertedTopics = (data ?? []) as { topic_id: string; name: string }[]
 
     if (insertedTopics.length > 0) {
+      // S9: mastery carryover — a topic matching one the student already built
+      // mastery on in ANOTHER course (e.g. "Limits Review" in Calc II after
+      // Calc I) seeds at a discounted fraction of the time-decayed prior
+      // instead of zero, so spaced repetition warm-starts and the scheduler
+      // doesn't treat known material as a cold gap.
+      const { data: priorRows } = await service
+        .from('topic_mastery')
+        .select('mastery_score, last_updated, topics!inner(name, course_id)')
+        .eq('user_id', userId)
+        .neq('topics.course_id', courseId)
+      const priorTopics = ((priorRows ?? []) as unknown as { mastery_score: number | null; last_updated: string | null; topics: { name: string } }[])
+        .filter(r => r.topics?.name)
+        .map(r => ({ name: r.topics.name, eff: effectiveMastery(r.mastery_score, r.last_updated) }))
+
+      let carried = 0
       await service.from('topic_mastery').upsert(
-        insertedTopics.map((t: { topic_id: string }) => ({
-          user_id: userId,
-          topic_id: t.topic_id,
-          mastery_score: 0,
-          confidence: 0,
-        })),
+        insertedTopics.map((t: { topic_id: string; name: string }) => {
+          const seed = priorTopics.length > 0 ? carryoverSeed(t.name, priorTopics) : null
+          if (seed !== null) carried++
+          return {
+            user_id: userId,
+            topic_id: t.topic_id,
+            mastery_score: seed ?? 0,
+            confidence: seed !== null ? 0.1 : 0,
+          }
+        }),
         { onConflict: 'user_id,topic_id', ignoreDuplicates: true }
       )
+      if (carried > 0) console.log(`${tag} carried over prior mastery for ${carried}/${insertedTopics.length} topics (S9)`)
     }
   }
 

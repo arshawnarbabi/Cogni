@@ -160,6 +160,50 @@ export function resolveTopicByName(
   return bestId
 }
 
+// ── Cross-course mastery carryover (S9) ──────────────────────────────────────
+// A student who finished Calc I doesn't start Calc II's "Limits Review" at
+// zero. When the profiler creates a topic whose name matches one the student
+// already built mastery on in ANOTHER course, the new topic seeds at a
+// discounted fraction of the (time-decayed) prior — knowledge transfers, but
+// context changes, so it carries conservatively.
+export const CARRYOVER_FACTOR = 0.6
+export const CARRYOVER_MIN_PRIOR = 0.25 // don't carry noise
+
+export type PriorTopic = { name: string; eff: number }
+
+/** Seed mastery for a new topic from prior-course topics, or null if nothing
+ *  carries. Exact (case-insensitive) name match first, then containment —
+ *  the SAME contract as resolveTopicByName. */
+export function carryoverSeed(newTopicName: string, priorTopics: PriorTopic[]): number | null {
+  const needle = newTopicName.trim().toLowerCase()
+  if (!needle) return null
+
+  let best: PriorTopic | null = null
+  for (const p of priorTopics) {
+    if (p.name.toLowerCase() === needle) {
+      best = p
+      break
+    }
+  }
+  if (!best) {
+    let bestLen = 0
+    for (const p of priorTopics) {
+      const name = p.name.toLowerCase()
+      // Containment only counts for meaningful names — single words like "and"
+      // would over-match.
+      if (name.length >= 6 && needle.length >= 6 && (name.includes(needle) || needle.includes(name))) {
+        if (name.length > bestLen) {
+          bestLen = name.length
+          best = p
+        }
+      }
+    }
+  }
+
+  if (!best || best.eff < CARRYOVER_MIN_PRIOR) return null
+  return round2(best.eff * CARRYOVER_FACTOR)
+}
+
 export type EvidenceInput = {
   topicId: string
   observed: number

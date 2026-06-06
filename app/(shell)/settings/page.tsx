@@ -17,6 +17,7 @@ import { ConnectClaude } from './_connect-claude'
 import { MemoryCenter } from './_memory'
 import { CalendarFeed } from './_calendar-feed'
 import { UsagePanel } from './_usage'
+import { CanvasPanel } from './_canvas'
 import { CheckCircle, XCircle } from '@phosphor-icons/react/dist/ssr'
 
 export const dynamic = 'force-dynamic'
@@ -132,6 +133,9 @@ export default async function SettingsPage() {
 
         {/* ICS calendar feed (S4) */}
         <CalendarFeed />
+
+        {/* Canvas import (S5) */}
+        <CanvasPanel />
 
         {/* Appearance */}
         <section className="flex flex-col gap-4 rounded-xl border border-border bg-card p-5">

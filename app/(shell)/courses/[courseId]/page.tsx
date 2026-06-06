@@ -4,6 +4,7 @@ import { readWikiFile } from '@/lib/wiki'
 import { getUserKey } from '@/lib/user-keys'
 import { dateKeyInTimeZone } from '@/lib/time'
 import { CourseDetailClient } from './_client'
+import { CourseGrades } from './_grades'
 
 export default async function CourseDetailPage({ params }: { params: Promise<{ courseId: string }> }) {
   const { courseId } = await params
@@ -120,6 +121,7 @@ export default async function CourseDetailPage({ params }: { params: Promise<{ c
       exams={examsResult.data ?? []}
       professorWiki={professorWiki}
       hasOpenAI={!!openaiKey}
+      gradesSlot={<CourseGrades courseId={c.course_id} />}
     />
   )
 }

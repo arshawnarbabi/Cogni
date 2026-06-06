@@ -1056,6 +1056,7 @@ export function CourseDetailClient({
   exams,
   professorWiki,
   hasOpenAI,
+  gradesSlot,
 }: {
   course: Course
   testResults: TestResult[]
@@ -1063,6 +1064,7 @@ export function CourseDetailClient({
   exams: CourseExam[]
   professorWiki: string | null
   hasOpenAI: boolean
+  gradesSlot?: React.ReactNode
 }) {
   const router = useRouter()
   const [mode, setMode] = useState<Mode>('overview')
@@ -1244,6 +1246,9 @@ export function CourseDetailClient({
                 onDeleted={() => router.refresh()}
               />
             )}
+
+            {/* Grades (S1) */}
+            {gradesSlot}
 
             {/* Test history */}
             {testResults.length > 0 && (

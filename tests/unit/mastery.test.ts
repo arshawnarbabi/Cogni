@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { nextMastery, flashcardEvidence, resolveTopicByName, effectiveMastery, LEARNING_RATES, DECAY_HALF_LIFE_DAYS, DECAY_GRACE_DAYS } from '@/lib/mastery'
+import { nextMastery, flashcardEvidence, resolveTopicByName, effectiveMastery, carryoverSeed, LEARNING_RATES, DECAY_HALF_LIFE_DAYS, DECAY_GRACE_DAYS, CARRYOVER_FACTOR } from '@/lib/mastery'
 
 describe('nextMastery (unified update rule)', () => {
   it('moves toward the observed level by the learning rate', () => {
@@ -120,5 +120,34 @@ describe('resolveTopicByName', () => {
   it('returns null rather than guessing on no match', () => {
     expect(resolveTopicByName('Thermodynamics', topics)).toBeNull()
     expect(resolveTopicByName('', topics)).toBeNull()
+  })
+})
+
+describe('carryoverSeed (cross-course mastery carryover, S9)', () => {
+  const prior = [
+    { name: 'Limits and Continuity', eff: 0.8 },
+    { name: 'The Chain Rule', eff: 0.6 },
+    { name: 'Weak Topic', eff: 0.1 },
+  ]
+
+  it('exact match carries a discounted fraction of the prior', () => {
+    expect(carryoverSeed('limits and continuity', prior)).toBeCloseTo(0.8 * CARRYOVER_FACTOR, 2)
+  })
+
+  it('containment match works for meaningful names', () => {
+    expect(carryoverSeed('Chain Rule', prior)).toBeCloseTo(0.6 * CARRYOVER_FACTOR, 2)
+  })
+
+  it('does not carry weak priors (noise floor)', () => {
+    expect(carryoverSeed('Weak Topic', prior)).toBeNull()
+  })
+
+  it('returns null when nothing matches', () => {
+    expect(carryoverSeed('Thermodynamics', prior)).toBeNull()
+    expect(carryoverSeed('', prior)).toBeNull()
+  })
+
+  it('short names never containment-match (no "and" over-matching)', () => {
+    expect(carryoverSeed('Rule', [{ name: 'The Chain Rule', eff: 0.9 }])).toBeNull()
   })
 })
