@@ -4,6 +4,7 @@ import { addDaysToDateKey, dateKeyInTimeZone, daysBetweenDateKeys } from '@/lib/
 import { prettifyTitle } from '@/lib/filename'
 import { effectiveMastery } from '@/lib/mastery'
 import { computeExamReadiness, type ExamReadiness } from '@/lib/readiness'
+import { courseGradeStatus, type CourseGradeStatus, type SchemeCategory, type GradeItemInput } from '@/lib/grades'
 
 export type TaskItem =
   | {
@@ -88,8 +89,9 @@ function buildInsight(params: {
   pendingHomework: number
   hasStarted: boolean
   examReadiness: ExamReadiness | null
+  gradeRisk: { courseName: string; current_pct: number; needed_for_b: number | null; b_reachable: boolean } | null
 }): string {
-  const { nextExam, weakestTopic, totalDueCards, pendingHomework, hasStarted, examReadiness } = params
+  const { nextExam, weakestTopic, totalDueCards, pendingHomework, hasStarted, examReadiness, gradeRisk } = params
 
   // I11/I9: when readiness is computable, the insight answers the student's
   // REAL question — "am I ready, and what do I fix first?" — instead of a
@@ -110,6 +112,16 @@ function buildInsight(params: {
   }
   if (nextExam && nextExam.daysAway <= 14 && examReadiness && hasStarted && examReadiness.readiness_pct < 60) {
     return `${nextExam.courseName} exam in ${nextExam.daysAway} days and you're only ~${examReadiness.readiness_pct}% ready — start with ${examReadiness.weakest_topics[0]?.name ?? 'your weakest topics'} today.`
+  }
+  // S1: grade jeopardy outranks routine framing — the student's real stakes.
+  if (gradeRisk) {
+    if (!gradeRisk.b_reachable && gradeRisk.needed_for_b !== null) {
+      return `${gradeRisk.courseName} is at ${gradeRisk.current_pct}% — a B is out of reach, so every remaining point matters. It gets today's focus.`
+    }
+    if (gradeRisk.needed_for_b !== null && gradeRisk.needed_for_b > 0) {
+      return `${gradeRisk.courseName}: you're at ${gradeRisk.current_pct}% and need ${gradeRisk.needed_for_b}% on the remaining work to keep a B — it gets today's focus.`
+    }
+    return `${gradeRisk.courseName} is sitting at ${gradeRisk.current_pct}% — it gets today's focus.`
   }
   // Brand-new: nothing reviewed yet. Frame it as a fresh start with a concrete next
   // step — NOT as a "weakest area" (every topic is 0% only because it's untouched).
@@ -242,6 +254,33 @@ export async function runScheduler(userId: string): Promise<void> {
     dueCardsByCourse.set(c.course_id, arr)
   }
 
+  // S1 integration: grade risk changes the PLAN. A course where the student is
+  // under water (or needs a near-perfect finish for a B-) outranks a course
+  // they're cruising in — regardless of card counts.
+  const gradeStatusByCourse = new Map<string, CourseGradeStatus>()
+  {
+    const [{ data: schemeRows }, { data: itemRows }] = await Promise.all([
+      service.from('course_grade_schemes').select('course_id, category, weight_pct').eq('user_id', userId).in('course_id', courseIds),
+      service.from('grade_items').select('course_id, category, points_earned, points_possible').eq('user_id', userId).in('course_id', courseIds),
+    ])
+    const schemesByCourse = new Map<string, SchemeCategory[]>()
+    for (const s of (schemeRows ?? []) as { course_id: string; category: string; weight_pct: number }[]) {
+      const arr = schemesByCourse.get(s.course_id) ?? []
+      arr.push({ category: s.category, weight_pct: Number(s.weight_pct) })
+      schemesByCourse.set(s.course_id, arr)
+    }
+    const itemsByCourse = new Map<string, GradeItemInput[]>()
+    for (const i of (itemRows ?? []) as { course_id: string; category: string | null; points_earned: number | null; points_possible: number }[]) {
+      const arr = itemsByCourse.get(i.course_id) ?? []
+      arr.push({ category: i.category, points_earned: i.points_earned !== null ? Number(i.points_earned) : null, points_possible: Number(i.points_possible) })
+      itemsByCourse.set(i.course_id, arr)
+    }
+    for (const cid of courseIds) {
+      const status = courseGradeStatus(schemesByCourse.get(cid) ?? [], itemsByCourse.get(cid) ?? [])
+      if (status) gradeStatusByCourse.set(cid, status)
+    }
+  }
+
   // M8: what the tutor learned changes the PLAN, not just the chat — topics
   // with a recently-seen recorded misconception get a deficit boost.
   const thirtyDaysAgo = new Date(Date.now() - 30 * 86_400_000).toISOString()
@@ -267,8 +306,11 @@ export async function runScheduler(userId: string): Promise<void> {
   for (const course of courses) {
     // I3: proximity × grade weight — a near 40% final pulls far more session
     // minutes toward its course than a near 5% quiz.
+    // S1: an at-risk grade pulls extra focus toward the course that needs it.
+    const gradeRiskBoost = gradeStatusByCourse.get(course.course_id)?.at_risk ? 1.25 : 1
     const multiplier = examProximityMultiplier(nextExamByCourse[course.course_id] ?? null)
       * gradeWeightMultiplier(nextExamWeightByCourse[course.course_id] ?? null)
+      * gradeRiskBoost
     const topics = topicsByCourse.get(course.course_id) ?? []
     if (topics.length === 0) continue
 
@@ -518,6 +560,15 @@ export async function runScheduler(userId: string): Promise<void> {
       .catch(() => null)
   }
 
+  // S1: the most at-risk graded course (worst current grade wins).
+  let gradeRisk: { courseName: string; current_pct: number; needed_for_b: number | null; b_reachable: boolean } | null = null
+  for (const [cid, status] of gradeStatusByCourse) {
+    if (!status.at_risk) continue
+    if (!gradeRisk || status.current_pct < gradeRisk.current_pct) {
+      gradeRisk = { courseName: courseNameMap[cid] ?? 'A course', current_pct: status.current_pct, needed_for_b: status.needed_for_b, b_reachable: status.b_reachable }
+    }
+  }
+
   const insightText = buildInsight({
     courses,
     nextExam,
@@ -526,6 +577,7 @@ export async function runScheduler(userId: string): Promise<void> {
     pendingHomework,
     hasStarted,
     examReadiness: nearestReadiness,
+    gradeRisk,
   })
 
   const allTasks: TaskItem[] = [

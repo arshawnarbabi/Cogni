@@ -3,6 +3,7 @@ import { runScheduler } from '@/lib/agents/scheduler'
 import { isValidCronRequest, runForAllUsers } from '@/lib/cron'
 import { pingHeartbeat } from '@/lib/heartbeat'
 import { processJobs } from '@/lib/jobs'
+import { syncLinkedCanvasCourses } from '@/lib/lms-sync'
 import { NextResponse } from 'next/server'
 
 // Cron processes every user with bounded concurrency. 300s is allowed on Vercel
@@ -34,7 +35,13 @@ export async function GET(request: Request) {
       return { claimed: 0, succeeded: 0, failed: 0 }
     })
 
-    const { total, failed } = await runForAllUsers((userId) => runScheduler(userId))
+    const { total, failed } = await runForAllUsers(async (userId) => {
+      // S5 auto-sync: fresh Canvas grades + due dates land BEFORE the day's
+      // plan is built. No-connection users skip on one cheap query; sync
+      // failures never block the plan.
+      await syncLinkedCanvasCourses(userId).catch(e => console.error('[scheduler cron] canvas sync failed', e))
+      await runScheduler(userId)
+    })
     if (failed > 0) console.error(`[scheduler cron] ${failed}/${total} users failed`)
     await pingHeartbeat(process.env.CRON_HEARTBEAT_SCHEDULER_URL, failed === 0)
     return NextResponse.json({ ok: true, ran: total, failed, jobsSwept: swept })

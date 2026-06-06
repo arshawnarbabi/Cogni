@@ -12,6 +12,7 @@ import { applyMasteryEvidence, flashcardObserved, effectiveMastery, LEARNING_RAT
 import { bumpStudyStreak } from '@/lib/streak'
 import { DIGEST_CHAR_BUDGET } from '@/lib/agents/memory'
 import { runScheduler, type TaskItem } from '@/lib/agents/scheduler'
+import { courseGradeStatus } from '@/lib/grades'
 import { dateKeyInTimeZone, isValidTimeZone } from '@/lib/time'
 import crypto from 'node:crypto'
 
@@ -137,11 +138,20 @@ const handler = createMcpHandler(
       guarded('get_course_overview', 'read', async ({ course_id }: { course_id: string }, userId, tz) => {
         const service = createServiceClient()
         const today = await userToday(service, userId, tz)
-        const [topics, exams, assignments] = await Promise.all([
+        const [topics, exams, assignments, schemeRows, gradeRows] = await Promise.all([
           service.from('topics').select('topic_id, name, professor_weight, topic_mastery(mastery_score, last_updated)').eq('user_id', userId).eq('course_id', course_id),
           service.from('exams').select('date, grade_weight').eq('user_id', userId).eq('course_id', course_id).gte('date', today).order('date'),
           service.from('assignments').select('name, due_date, completion_status').eq('user_id', userId).eq('course_id', course_id).eq('completion_status', 'pending').order('due_date'),
+          service.from('course_grade_schemes').select('category, weight_pct').eq('user_id', userId).eq('course_id', course_id),
+          service.from('grade_items').select('category, points_earned, points_possible').eq('user_id', userId).eq('course_id', course_id),
         ])
+
+        // S1: the student's standing + stakes, so the connected Claude tutors
+        // with the same urgency the in-app tutor has.
+        const gradeStatus = courseGradeStatus(
+          ((schemeRows.data ?? []) as { category: string; weight_pct: number }[]).map(s => ({ category: s.category, weight_pct: Number(s.weight_pct) })),
+          ((gradeRows.data ?? []) as { category: string | null; points_earned: number | null; points_possible: number }[]).map(i => ({ category: i.category, points_earned: i.points_earned !== null ? Number(i.points_earned) : null, points_possible: Number(i.points_possible) })),
+        )
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const topicsOut = (topics.data ?? []).map((t: any) => {
           const m = Array.isArray(t.topic_mastery) ? t.topic_mastery[0] : null
@@ -149,7 +159,14 @@ const handler = createMcpHandler(
           const eff = effectiveMastery(m?.mastery_score, m?.last_updated)
           return { topic_id: t.topic_id, name: t.name, weight: Number(t.professor_weight ?? 0.5), mastery_pct: Math.round(eff * 100) }
         })
-        return asText({ topics: topicsOut, upcoming_exams: exams.data ?? [], pending_assignments: assignments.data ?? [] })
+        return asText({
+          topics: topicsOut,
+          upcoming_exams: exams.data ?? [],
+          pending_assignments: assignments.data ?? [],
+          grade: gradeStatus
+            ? { current_pct: gradeStatus.current_pct, needed_for_b_pct: gradeStatus.needed_for_b, at_risk: gradeStatus.at_risk }
+            : null,
+        })
       }),
     )
 

@@ -91,6 +91,38 @@ export function computeGradeSummary(
   }
 }
 
+// ── Grade risk (the signal other systems consume) ───────────────────────────
+export type CourseGradeStatus = {
+  current_pct: number
+  /** % needed on remaining work to finish at 80 (a B-); null = fully graded. */
+  needed_for_b: number | null
+  b_reachable: boolean
+  at_risk: boolean
+}
+
+/**
+ * One number the scheduler/tutor/insight can act on. A course is AT RISK when
+ * the current grade is under 75, or keeping a B- requires ≥85% on everything
+ * remaining, or the B- is already out of reach. Returns null when nothing is
+ * graded yet (no signal — don't alarm a fresh course).
+ */
+export function courseGradeStatus(scheme: SchemeCategory[], items: GradeItemInput[]): CourseGradeStatus | null {
+  const summary = computeGradeSummary(scheme, items)
+  if (summary.current_pct === null) return null
+  const [whatIf80] = whatIfTargets(scheme, items, [80])
+  const needed = whatIf80.needed_pct
+  const at_risk =
+    summary.current_pct < 75 ||
+    (needed !== null && !whatIf80.achievable) ||
+    (needed !== null && whatIf80.achievable && needed >= 85)
+  return {
+    current_pct: summary.current_pct,
+    needed_for_b: needed,
+    b_reachable: whatIf80.achievable,
+    at_risk,
+  }
+}
+
 export type WhatIf = {
   target_pct: number
   /** % needed on ALL remaining (ungraded) weight to land exactly on target.

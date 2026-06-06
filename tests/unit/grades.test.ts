@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { computeGradeSummary, whatIfTargets } from '@/lib/grades'
+import { computeGradeSummary, whatIfTargets, courseGradeStatus } from '@/lib/grades'
 
 const SCHEME = [
   { category: 'Exams', weight_pct: 50 },
@@ -109,5 +109,47 @@ describe('whatIfTargets — "what do I need on the final?" (S1)', () => {
     const [t] = whatIfTargets([], [], [80])
     expect(t.needed_pct).toBeNull()
     expect(t.achievable).toBe(false)
+  })
+})
+
+describe('courseGradeStatus — the at-risk signal (S1 integration)', () => {
+  it('healthy course: not at risk', () => {
+    const s = courseGradeStatus(SCHEME, [
+      { category: 'Exams', points_earned: 90, points_possible: 100 },
+      { category: 'Homework', points_earned: 28, points_possible: 30 },
+    ])
+    expect(s).not.toBeNull()
+    expect(s!.at_risk).toBe(false)
+  })
+
+  it('low current grade (<75) is at risk', () => {
+    const s = courseGradeStatus(SCHEME, [
+      { category: 'Exams', points_earned: 65, points_possible: 100 },
+    ])
+    expect(s!.current_pct).toBe(65)
+    expect(s!.at_risk).toBe(true)
+  })
+
+  it('needing ≥85% on the rest for a B- is at risk even with a decent current grade', () => {
+    // Exams 76% on 50w → locked 38; B- needs (80-38)/50*100 = 84%... tune: 75% → locked 37.5, need 85%.
+    const s = courseGradeStatus(SCHEME, [
+      { category: 'Exams', points_earned: 75, points_possible: 100 },
+    ])
+    expect(s!.current_pct).toBe(75)
+    expect(s!.needed_for_b).toBe(85)
+    expect(s!.at_risk).toBe(true)
+  })
+
+  it('B- out of reach is at risk', () => {
+    const s = courseGradeStatus(SCHEME, [
+      { category: 'Exams', points_earned: 40, points_possible: 100 },
+      { category: 'Homework', points_earned: 10, points_possible: 30 },
+    ])
+    expect(s!.b_reachable).toBe(false)
+    expect(s!.at_risk).toBe(true)
+  })
+
+  it('no grades yet: null (no alarm on fresh courses)', () => {
+    expect(courseGradeStatus(SCHEME, [])).toBeNull()
   })
 })
