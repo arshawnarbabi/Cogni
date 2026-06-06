@@ -47,9 +47,11 @@ describe('review_card_atomic RPC (evidence model, F3)', () => {
     expect(card!.fsrs_reps).toBe(99)
     expect(card!.fsrs_next_review_date).toBe('2099-01-01')
 
-    // EWMA with the deck-scaled rate: 0.5 + lr/sqrt(deck) * (0.75 - 0.5)
+    // EWMA with the deck-scaled rate: 0.5 + lr/sqrt(deck) * (0.75 - 0.5).
+    // precision 2: mastery_score is numeric(3,2) — the column itself rounds
+    // to two decimals, so the stored value can differ from the float by ≤0.005.
     const lr = await deckScaledLr(topic, 0.2)
-    expect(await masteryOf(topic)).toBeCloseTo(0.5 + lr * 0.25, 4)
+    expect(await masteryOf(topic)).toBeCloseTo(0.5 + lr * 0.25, 2)
     expect(await historyCount(topic)).toBe(before + 1)     // history written
   })
 
