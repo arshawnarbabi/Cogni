@@ -10,6 +10,7 @@ import { assignNewCardDueDates } from '@/lib/agents/flashcard'
 import { applyMasteryEvidence, flashcardObserved, effectiveMastery, LEARNING_RATES } from '@/lib/mastery'
 import { bumpStudyStreak } from '@/lib/streak'
 import { DIGEST_CHAR_BUDGET } from '@/lib/agents/memory'
+import { runScheduler, type TaskItem } from '@/lib/agents/scheduler'
 import { dateKeyInTimeZone, isValidTimeZone } from '@/lib/time'
 import crypto from 'node:crypto'
 
@@ -462,6 +463,161 @@ const handler = createMcpHandler(
       }),
     )
 
+    server.registerTool(
+      'get_study_plan',
+      {
+        title: "Today's study plan",
+        description: "The student's Cogni study plan for today (or a given date): review blocks, homework due, quizzes — with urgency reasons. Use it to answer 'what should I work on?'",
+        inputSchema: { date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe('YYYY-MM-DD; defaults to today in their timezone') },
+      },
+      guarded('get_study_plan', 'read', async ({ date }: { date?: string }, userId, tz) => {
+        const service = createServiceClient()
+        const planDate = date ?? await userToday(service, userId, tz)
+        const { data: plan } = await service
+          .from('study_plan').select('tasks')
+          .eq('user_id', userId).eq('plan_date', planDate).maybeSingle()
+        const tasks = ((plan?.tasks ?? []) as TaskItem[]).map(t => {
+          if (t.type === 'insight') return { type: t.type, text: t.text }
+          if (t.type === 'homework') return { type: t.type, course: t.course_name, title: t.title, due: t.due_date, overdue: t.overdue, assignment_id: t.assignment_id, why: t.reason }
+          if (t.type === 'flashcard_review') return { type: t.type, course: t.course_name, cards_due: t.card_count, minutes: t.duration_minutes, why: t.reason }
+          return { type: t.type, course: t.course_name, why: t.reason }
+        })
+        return asText({ date: planDate, tasks })
+      }),
+    )
+
+    server.registerTool(
+      'complete_assignment',
+      {
+        title: 'Mark an assignment complete',
+        description: "Mark a homework assignment done in Cogni (assignment_id from get_course_overview or get_study_plan). Recomputes today's study plan so it reflects the change.",
+        inputSchema: { assignment_id: z.string() },
+      },
+      guarded('complete_assignment', 'write', async ({ assignment_id }: { assignment_id: string }, userId) => {
+        const service = createServiceClient()
+        const { data: assignment } = await service
+          .from('assignments').select('assignment_id, name')
+          .eq('assignment_id', assignment_id).eq('user_id', userId).maybeSingle()
+        if (!assignment) throw new McpToolError('assignment_not_found', 'assignment_id must come from get_course_overview or get_study_plan.')
+
+        const overBudget = await consumeMcpWrite(userId)
+        if (overBudget) throw new McpToolError('daily_limit', overBudget)
+
+        const { error } = await service
+          .from('assignments').update({ completion_status: 'complete' })
+          .eq('assignment_id', assignment_id).eq('user_id', userId)
+        if (error) throw new McpToolError('update_failed')
+        // Replan so Today reflects it immediately.
+        await runScheduler(userId).catch(e => console.error('[mcp] post-completion replan failed', e))
+        return asText({ ok: true, message: `"${assignment.name ?? 'Assignment'}" marked complete — today's plan recomputed.` })
+      }),
+    )
+
+    server.registerTool(
+      'record_quiz_result',
+      {
+        title: 'Record a quiz you ran',
+        description: "After YOU quiz the student conversationally (you author the questions — costs them nothing), record the result so it shows in their Progress tab and moves mastery. Provide per-topic scores when you can.",
+        inputSchema: {
+          course_id: z.string().describe('A course_id from list_courses'),
+          score_pct: z.number().min(0).max(100).describe('Overall score 0-100'),
+          question_count: z.number().int().min(1).max(50),
+          topic_scores: z.array(z.object({
+            topic_id: z.string(),
+            score: z.number().min(0).max(1),
+          })).max(10).optional().describe('Per-topic fraction correct (topic_id from get_course_overview)'),
+        },
+      },
+      guarded('record_quiz_result', 'write', async (
+        { course_id, score_pct, question_count, topic_scores }: { course_id: string; score_pct: number; question_count: number; topic_scores?: { topic_id: string; score: number }[] },
+        userId,
+      ) => {
+        const service = createServiceClient()
+        const { data: course } = await service
+          .from('courses').select('course_id')
+          .eq('course_id', course_id).eq('user_id', userId).maybeSingle()
+        if (!course) throw new McpToolError('course_not_found', 'course_id must come from list_courses.')
+
+        const overBudget = await consumeMcpWrite(userId)
+        if (overBudget) throw new McpToolError('daily_limit', overBudget)
+
+        const { error } = await service.from('practice_test_results').insert({
+          user_id: userId,
+          course_id,
+          test_type: 'practice_quiz',
+          topic_filter: 'via your own Claude (MCP)',
+          question_count,
+          correct_count: Math.round((score_pct / 100) * question_count),
+          score_pct: Math.round(score_pct * 100) / 100,
+          missed_topics: [],
+          mastery_updates: [],
+        })
+        if (error) throw new McpToolError('insert_failed')
+
+        // Mastery evidence at the in-session quiz rate, ownership-validated.
+        let updated = 0
+        if (topic_scores && topic_scores.length > 0) {
+          const ids = topic_scores.map(t => t.topic_id)
+          const { data: owned } = await service
+            .from('topics').select('topic_id')
+            .eq('user_id', userId).eq('course_id', course_id).in('topic_id', ids)
+          const ownedSet = new Set(((owned ?? []) as { topic_id: string }[]).map(t => t.topic_id))
+          const evidences = topic_scores
+            .filter(t => ownedSet.has(t.topic_id))
+            .map(t => ({ topicId: t.topic_id, observed: t.score, learningRate: LEARNING_RATES.quiz_in_session }))
+          if (evidences.length > 0) {
+            const applied = await applyMasteryEvidence(userId, evidences).catch(() => [])
+            updated = applied.length
+          }
+        }
+        return asText({ ok: true, message: `Quiz recorded (${Math.round(score_pct)}%) — visible in Progress. Mastery updated for ${updated} topic${updated === 1 ? '' : 's'}.` })
+      }),
+    )
+
+    server.registerTool(
+      'research',
+      {
+        title: 'Deep research across course materials',
+        description: "Multi-query search over the student's uploaded materials for synthesizing a study guide or deep answer. YOU write 2-5 angled sub-queries (definitions, examples, edge cases, professor's framing); the tool returns deduped excerpts with source filenames for citation.",
+        inputSchema: {
+          course_id: z.string().describe('A course_id from list_courses'),
+          queries: z.array(z.string().min(3)).min(1).max(5).describe('2-5 sub-queries attacking the question from different angles'),
+        },
+      },
+      guarded('research', 'read', async (
+        { course_id, queries }: { course_id: string; queries: string[] },
+        userId,
+      ) => {
+        const seen = new Set<string>()
+        const collected: { material_id: string; chunk_index: number; content: string }[] = []
+        for (const q of queries.slice(0, 5)) {
+          const { chunks } = await retrieveChunksDetailed(q, course_id, userId, 4)
+            .catch(() => ({ chunks: [] as { material_id: string; chunk_index: number; content: string }[] }))
+          for (const c of chunks) {
+            const key = `${c.material_id}:${c.chunk_index}`
+            if (!seen.has(key)) {
+              seen.add(key)
+              collected.push(c)
+            }
+          }
+        }
+        if (collected.length === 0) {
+          return asText('No matching material found across any sub-query. The topic may not be covered in the uploads — say so rather than inventing content.')
+        }
+        // Source filenames for citation.
+        const service = createServiceClient()
+        const materialIds = [...new Set(collected.map(c => c.material_id))]
+        const { data: mats } = await service
+          .from('materials').select('material_id, filename')
+          .eq('user_id', userId).in('material_id', materialIds)
+        const nameById = new Map(((mats ?? []) as { material_id: string; filename: string | null }[]).map(m => [m.material_id, m.filename ?? 'unknown file']))
+        return asText({
+          excerpts: collected.map(c => ({ source: nameById.get(c.material_id) ?? 'unknown file', content: c.content })),
+          note: 'Cite sources by filename when synthesizing.',
+        })
+      }),
+    )
+
     // ── PROMPT (M4): the tutoring persona ─────────────────────────────────────
     server.registerPrompt(
       'tutor',
@@ -471,6 +627,75 @@ const handler = createMcpHandler(
       },
       async () => ({
         messages: [{ role: 'user' as const, content: { type: 'text' as const, text: TUTOR_GUIDE } }],
+      }),
+    )
+
+    // X6: one-click study modes matching the in-app tutor's behaviors.
+    server.registerPrompt(
+      'exam_prep',
+      {
+        title: 'Exam prep session',
+        description: 'Structured cram session for my next exam: readiness check, weakest topics first, verification questions.',
+      },
+      async () => ({
+        messages: [{
+          role: 'user' as const,
+          content: {
+            type: 'text' as const,
+            text: `${TUTOR_GUIDE}
+
+THIS SESSION IS EXAM PREP. Structure it:
+1. Call list_courses, then get_course_overview for the course I name — find the NEAREST upcoming exam and its grade weight.
+2. Call get_weak_topics. Build a prioritized hit-list: high professor-weight × low mastery topics covered by that exam.
+3. Work the list top-down: for each topic, search_materials first, explain what I'm missing, then pose ONE exam-style verification question. Grade my answer with grade_answer.
+4. Track the clock with me — if the exam is days away, spread topics; if it's tomorrow, triage to the highest-weight gaps only.
+5. End with: record the session via log_study_session, and tell me bluntly how ready I am and what to do tomorrow.`,
+          },
+        }],
+      }),
+    )
+
+    server.registerPrompt(
+      'review_session',
+      {
+        title: 'Flashcard review session',
+        description: 'Run my due flashcards conversationally — quiz me card by card and record every rating.',
+      },
+      async () => ({
+        messages: [{
+          role: 'user' as const,
+          content: {
+            type: 'text' as const,
+            text: `Run my Cogni flashcard review. Protocol:
+1. Call get_due_cards (ask me which course first if I have several with cards due).
+2. One card at a time: show the FRONT only. Wait for my answer.
+3. Judge my answer against the back — be strict but fair. Show the back, tell me what I missed.
+4. Call review_card with the honest rating (1=Again if I failed, 2=Hard if shaky, 3=Good, 4=Easy if instant) — every card, no exceptions, or the review doesn't count.
+5. Keep a running score. At the end: call log_study_session with a summary, and tell me which topics need real study (not just cards).`,
+          },
+        }],
+      }),
+    )
+
+    server.registerPrompt(
+      'homework_help',
+      {
+        title: 'Homework help (coached)',
+        description: "Walk me through a homework problem step by step — coach me, don't just solve it.",
+      },
+      async () => ({
+        messages: [{
+          role: 'user' as const,
+          content: {
+            type: 'text' as const,
+            text: `Help me with a homework problem from one of my Cogni courses. Rules:
+1. Call list_courses, then search_materials for the relevant concept once I share the problem — my professor's method wins over the generic one.
+2. NEVER hand me the final answer. Restate the problem in one line, then walk the solution path ONE step at a time: ask what I'd try, let me do the work between steps.
+3. Name the underlying course concept at each step so I learn the pattern.
+4. When I'm wrong, point at the exact step and why — let me retry before you correct it.
+5. After we solve it: summarize the method in 2-3 lines, call grade_answer for the main topic with an honest 0-1 score for how I did, and offer create_flashcards on anything I slipped on. End with log_study_session.`,
+          },
+        }],
       }),
     )
   },
