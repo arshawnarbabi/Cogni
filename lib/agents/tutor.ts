@@ -3,6 +3,7 @@ import { readWikiFile } from '@/lib/wiki'
 import { dateKeyInTimeZone, startOfLocalDayUtc } from '@/lib/time'
 import { getCourseMemory } from '@/lib/agents/memory'
 import { clampBlock } from '@/lib/agents/context-budget'
+import { effectiveMastery } from '@/lib/mastery'
 
 export type TutorMode = 'answer' | 'teach' | 'focus'
 
@@ -77,19 +78,25 @@ export async function buildTutorSystemPrompt(
     getCourseMemory(userId, courseId).catch(() => null),
   ])
 
+  // I1: rank by EFFECTIVE (time-decayed) mastery — a topic "mastered" weeks ago
+  // and never revisited is weak NOW, even though its stored score looks high.
+  // Fetch all rows (bounded: ~25/course) and sort post-decay; ordering by the
+  // stored score would miss exactly the stale-high topics decay exists to catch.
   const { data: mastery } = await service
     .from('topic_mastery')
-    .select('mastery_score, topics(name)')
+    .select('mastery_score, last_updated, topics(name)')
     .eq('user_id', userId)
-    .order('mastery_score', { ascending: true })
-    .limit(10)
 
   const weakTopics = (mastery ?? [])
-    .map((m: { mastery_score: number | null; topics: { name: string } | null }) => {
+    .map((m: { mastery_score: number | null; last_updated: string | null; topics: { name: string } | null }) => {
       const topic = m.topics
-      return topic ? `- ${topic.name} (${Math.round(Number(m.mastery_score ?? 0) * 100)}%)` : null
+      if (!topic) return null
+      return { name: topic.name, eff: effectiveMastery(m.mastery_score, m.last_updated) }
     })
-    .filter(Boolean)
+    .filter((t: { name: string; eff: number } | null): t is { name: string; eff: number } => t !== null)
+    .sort((a: { eff: number }, b: { eff: number }) => a.eff - b.eff)
+    .slice(0, 10)
+    .map((t: { name: string; eff: number }) => `- ${t.name} (${Math.round(t.eff * 100)}%)`)
     .join('\n')
 
   const verificationSection = mode !== 'answer' ? `
@@ -169,6 +176,13 @@ You can open visual artifacts in the student's split view by calling the right t
 When the student says yes to an offer, generate immediately — follow each tool's own description for any quick clarifying questions (format, count, subtopic). You MAY call create_flashcards and create_quiz in the same turn if the student asks for both — they will stack as separate chips in the chat and both remain accessible.
 
 **Artifact persistence:** Every artifact you create leaves a chip in the chat (e.g. "10 flashcards — Derivatives"). Those chips stay in place for the whole session and the student can tap them any time to re-open that specific artifact. If the student asks to get an earlier deck or quiz back, tell them to scroll up and tap the chip on the message where you created it — do NOT say you can't access previously-made artifacts. They're always still there.
+
+## Calibrate depth to mastery
+The Context section shows the student's per-topic mastery percentages. Scale how you explain to where they ARE on the topic at hand:
+- **Below ~30%**: scaffold heavily — one concept at a time, concrete worked examples before abstraction, check understanding at each step.
+- **~30–70%**: guided practice — ask before telling, let them attempt the step first, correct precisely where they slip.
+- **Above ~70%**: stretch — edge cases, "what breaks if…" questions, connections to other topics; skip the basics entirely.
+Explaining the chain rule the same way to a student at 20% and one at 80% wastes both their time.
 
 ## Guardrails
 - If a question references material not in the uploaded files, say so. Do not invent content.

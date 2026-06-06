@@ -1,7 +1,7 @@
 import { createServiceClient } from '@/lib/supabase/server'
 import { getUserApiKey } from '@/lib/vault'
 import { readWikiFile } from '@/lib/wiki'
-import { applyMasteryEvidence, resolveTopicByName } from '@/lib/mastery'
+import { applyMasteryEvidence, resolveTopicByName, effectiveMastery } from '@/lib/mastery'
 import { withRetry } from '@/lib/ai/call'
 import Anthropic from '@anthropic-ai/sdk'
 
@@ -41,20 +41,20 @@ export async function generatePracticeQuiz(
   format: QuizFormat,
   questionCount: number,
   topicFilter?: string,
-  difficulty: 'easy' | 'medium' | 'hard' = 'medium',
+  difficulty?: 'easy' | 'medium' | 'hard',
 ): Promise<QuizQuestion[]> {
   const apiKey = await getUserApiKey(userId)
   if (!apiKey) throw new Error('No API key')
 
   const service = createServiceClient()
 
-  // Fetch topics — weak areas first
+  // Fetch topics — weak areas first (I1: effective/decayed mastery)
   const { data: mastery } = await service
     .from('topic_mastery')
-    .select('mastery_score, topics(topic_id, name)')
+    .select('mastery_score, last_updated, topics(topic_id, name)')
     .eq('user_id', userId)
     .order('mastery_score', { ascending: true })
-    .limit(20)
+    .limit(40)
 
   const { data: allTopics } = await service
     .from('topics')
@@ -67,15 +67,26 @@ export async function generatePracticeQuiz(
   const masteryMap = new Map<string, number>()
   for (const m of mastery ?? []) {
     const t = m.topics as { topic_id: string; name: string } | null
-    if (t) masteryMap.set(t.topic_id, Number(m.mastery_score ?? 0))
+    if (t) masteryMap.set(t.topic_id, effectiveMastery((m as { mastery_score: number | null }).mastery_score, (m as { last_updated: string | null }).last_updated))
   }
 
-  const topicList = (allTopics ?? [])
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    .filter((t: any) => !topicFilter || t.name.toLowerCase().includes(topicFilter.toLowerCase()))
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const quizTopics = (allTopics ?? []).filter((t: any) => !topicFilter || t.name.toLowerCase().includes(topicFilter.toLowerCase()))
+  const topicList = quizTopics
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     .map((t: any) => `- ${t.name} (mastery: ${Math.round((masteryMap.get(t.topic_id) ?? 0) * 100)}%)`)
     .join('\n')
+
+  // I7: when the caller didn't pin a difficulty, pick it from the student's
+  // actual level on the quizzed topics — weak topics get confidence-building
+  // recall, strong topics get synthesis/edge-case questions. A fixed 'medium'
+  // wasted both ends.
+  if (!difficulty) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const levels = quizTopics.map((t: any) => masteryMap.get(t.topic_id) ?? 0)
+    const avg = levels.length > 0 ? levels.reduce((s: number, v: number) => s + v, 0) / levels.length : 0
+    difficulty = avg < 0.35 ? 'easy' : avg > 0.7 ? 'hard' : 'medium'
+  }
 
   const formatInstruction =
     format === 'mc'

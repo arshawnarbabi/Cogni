@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { nextMastery, flashcardEvidence, resolveTopicByName, LEARNING_RATES } from '@/lib/mastery'
+import { nextMastery, flashcardEvidence, resolveTopicByName, effectiveMastery, LEARNING_RATES, DECAY_HALF_LIFE_DAYS, DECAY_GRACE_DAYS } from '@/lib/mastery'
 
 describe('nextMastery (unified update rule)', () => {
   it('moves toward the observed level by the learning rate', () => {
@@ -69,6 +69,35 @@ describe('flashcardEvidence', () => {
     const fromBig = nextMastery(0.5, 0, big.observed, big.learningRate, true).score - 0.5
     const fromSmall = nextMastery(0.5, 0, small.observed, small.learningRate, true).score - 0.5
     expect(fromSmall).toBeGreaterThan(fromBig * 2)
+  })
+})
+
+describe('effectiveMastery (time decay, I1)', () => {
+  const DAY = 86_400_000
+  const now = 1_750_000_000_000
+
+  it('no decay within the grace week', () => {
+    expect(effectiveMastery(0.8, new Date(now - 3 * DAY), now)).toBeCloseTo(0.8, 2)
+    expect(effectiveMastery(0.8, new Date(now - DECAY_GRACE_DAYS * DAY), now)).toBeCloseTo(0.8, 2)
+  })
+
+  it('halves after one half-life past the grace week', () => {
+    const t = new Date(now - (DECAY_GRACE_DAYS + DECAY_HALF_LIFE_DAYS) * DAY)
+    expect(effectiveMastery(0.8, t, now)).toBeCloseTo(0.4, 2)
+  })
+
+  it('a week-2 cram no longer shows full mastery in week 10 (the I1 scenario)', () => {
+    const eightWeeksAgo = new Date(now - 56 * DAY)
+    const eff = effectiveMastery(0.85, eightWeeksAgo, now)
+    expect(eff).toBeLessThan(0.55)
+    expect(eff).toBeGreaterThan(0.2) // decays, doesn't vanish
+  })
+
+  it('handles zero/null score and missing/garbage timestamps', () => {
+    expect(effectiveMastery(0, new Date(now - 100 * DAY), now)).toBe(0)
+    expect(effectiveMastery(null, null, now)).toBe(0)
+    expect(effectiveMastery(0.6, null, now)).toBeCloseTo(0.6, 2)
+    expect(effectiveMastery(0.6, 'not-a-date', now)).toBeCloseTo(0.6, 2)
   })
 })
 

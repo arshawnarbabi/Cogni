@@ -36,6 +36,7 @@ export const LEARNING_RATES = {
   quiz_in_session: 0.3,
   exam: 0.7,
   flashcard_base: 0.25,
+  conversation: 0.12, // distilled tutoring-session signals (I2) — weak evidence
 } as const
 
 // What a flashcard rating says about the student's level on the topic.
@@ -84,6 +85,31 @@ export function nextMastery(
 
 function round2(n: number): number {
   return Math.round(n * 100) / 100
+}
+
+// ── Time decay (I1) ──────────────────────────────────────────────────────────
+// A score earned weeks ago and never revisited is NOT current knowledge — an
+// exam tests what you know NOW. Mastery previously only changed on review, so a
+// topic crammed in week 2 showed 85% forever and the scheduler stopped
+// surfacing it. Effective mastery decays exponentially after a grace week:
+// half-life 60 days. Applied lazily at READ time (no cron, stored score
+// untouched — new evidence through nextMastery() naturally "resets" it).
+export const DECAY_GRACE_DAYS = 7
+export const DECAY_HALF_LIFE_DAYS = 60
+
+export function effectiveMastery(
+  score: number | null | undefined,
+  lastUpdated: string | Date | null | undefined,
+  now: number = Date.now(),
+): number {
+  const s = Number(score ?? 0)
+  if (s <= 0) return 0
+  if (!lastUpdated) return round2(s)
+  const updatedMs = new Date(lastUpdated).getTime()
+  if (!Number.isFinite(updatedMs)) return round2(s)
+  const days = (now - updatedMs) / 86_400_000
+  if (days <= DECAY_GRACE_DAYS) return round2(s)
+  return round2(s * Math.exp(-Math.LN2 * (days - DECAY_GRACE_DAYS) / DECAY_HALF_LIFE_DAYS))
 }
 
 // Evidence parameters for one flashcard rating. The per-flip learning rate is

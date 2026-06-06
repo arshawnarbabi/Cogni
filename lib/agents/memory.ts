@@ -2,7 +2,7 @@ import Anthropic from '@anthropic-ai/sdk'
 import { createServiceClient } from '@/lib/supabase/server'
 import { getUserApiKey } from '@/lib/vault'
 import { withRetry } from '@/lib/ai/call'
-import { resolveTopicByName } from '@/lib/mastery'
+import { resolveTopicByName, applyMasteryEvidence, LEARNING_RATES, type EvidenceInput } from '@/lib/mastery'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Persistent tutor memory (M1 + M2 + M9).
@@ -67,6 +67,7 @@ type Distilled = {
   understood: string[]
   preferences: string[]
   topic_names: string[]
+  topic_signals: { topic_name: string; signal: 'understood' | 'struggled' }[]
   updated_digest: string
 }
 
@@ -78,12 +79,19 @@ export function parseDistilled(raw: string): Distilled | null {
     const p = JSON.parse(match ? match[0] : cleaned)
     if (typeof p.summary !== 'string' || !p.summary.trim()) return null
     const arr = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string').slice(0, 8) : [])
+    const signals = Array.isArray(p.topic_signals)
+      ? (p.topic_signals as { topic_name?: unknown; signal?: unknown }[])
+          .filter(s => typeof s?.topic_name === 'string' && (s?.signal === 'understood' || s?.signal === 'struggled'))
+          .slice(0, 10)
+          .map(s => ({ topic_name: s.topic_name as string, signal: s.signal as 'understood' | 'struggled' }))
+      : []
     return {
       summary: p.summary.trim().slice(0, 1200),
       confusions: arr(p.confusions),
       understood: arr(p.understood),
       preferences: arr(p.preferences),
       topic_names: arr(p.topic_names),
+      topic_signals: signals,
       updated_digest: typeof p.updated_digest === 'string' ? p.updated_digest.trim().slice(0, DIGEST_CHAR_BUDGET) : '',
     }
   } catch {
@@ -155,8 +163,11 @@ Return ONLY valid JSON (no markdown fences):
   "understood": ["specific things the student demonstrably got right", ...],
   "preferences": ["explicitly stated study/explanation preferences, if any", ...],
   "topic_names": ["course topic names touched in this session", ...],
+  "topic_signals": [{"topic_name": "course topic name", "signal": "understood" | "struggled"}, ...],
   "updated_digest": "the NEW rolling course memory: merge the existing memory with this session. A running narrative of what's been covered across all sessions, persistent confusions (drop ones now resolved), and stable preferences. Write in compact prose + short bullets. HARD LIMIT ~600 words — compress older history harder than recent."
 }
+
+topic_signals rules: only include a topic when the transcript shows CLEAR evidence — the student demonstrably explained/answered it correctly ("understood") or demonstrably got it wrong / said they're lost ("struggled"). Mere exposure is NOT a signal; omit when unsure.
 
 Rules: be specific and factual — only what the transcript supports. Empty arrays are fine. No advice, no filler.`,
     }],
@@ -211,6 +222,28 @@ Rules: be specific and factual — only what the transcript supports. Empty arra
       digest: distilled.updated_digest.slice(0, DIGEST_CHAR_BUDGET),
       updated_at: new Date().toISOString(),
     }, { onConflict: 'user_id,course_id' })
+  }
+
+  // I2: the conversation IS learning evidence. Clear demonstrations of
+  // understanding/struggle move mastery — at the low 'conversation' learning
+  // rate, so an hour of tutoring finally changes the study plan, but one chat
+  // can't swing a topic the way a graded quiz does.
+  if (distilled.topic_signals.length > 0) {
+    const evidences: EvidenceInput[] = []
+    const seen = new Set<string>()
+    for (const sig of distilled.topic_signals) {
+      const topicId = resolveTopicByName(sig.topic_name, (courseTopics ?? []) as { topic_id: string; name: string }[])
+      if (!topicId || seen.has(topicId)) continue
+      seen.add(topicId)
+      evidences.push({
+        topicId,
+        observed: sig.signal === 'understood' ? 0.75 : 0.25,
+        learningRate: LEARNING_RATES.conversation,
+      })
+    }
+    if (evidences.length > 0) {
+      await applyMasteryEvidence(userId, evidences).catch(e => console.error('[memory] conversation evidence failed', e))
+    }
   }
 
   return true

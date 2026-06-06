@@ -7,7 +7,7 @@ import { retrieveChunksDetailed } from '@/lib/rag'
 import { readWikiFile } from '@/lib/wiki'
 import { newCardDefaults, scheduleReview } from '@/lib/fsrs'
 import { assignNewCardDueDates } from '@/lib/agents/flashcard'
-import { applyMasteryEvidence, flashcardObserved, LEARNING_RATES } from '@/lib/mastery'
+import { applyMasteryEvidence, flashcardObserved, effectiveMastery, LEARNING_RATES } from '@/lib/mastery'
 import { bumpStudyStreak } from '@/lib/streak'
 import { DIGEST_CHAR_BUDGET } from '@/lib/agents/memory'
 import { dateKeyInTimeZone, isValidTimeZone } from '@/lib/time'
@@ -136,14 +136,16 @@ const handler = createMcpHandler(
         const service = createServiceClient()
         const today = await userToday(service, userId, tz)
         const [topics, exams, assignments] = await Promise.all([
-          service.from('topics').select('topic_id, name, professor_weight, topic_mastery(mastery_score)').eq('user_id', userId).eq('course_id', course_id),
+          service.from('topics').select('topic_id, name, professor_weight, topic_mastery(mastery_score, last_updated)').eq('user_id', userId).eq('course_id', course_id),
           service.from('exams').select('date, grade_weight').eq('user_id', userId).eq('course_id', course_id).gte('date', today).order('date'),
           service.from('assignments').select('name, due_date, completion_status').eq('user_id', userId).eq('course_id', course_id).eq('completion_status', 'pending').order('due_date'),
         ])
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const topicsOut = (topics.data ?? []).map((t: any) => {
-          const ms = Array.isArray(t.topic_mastery) ? t.topic_mastery[0]?.mastery_score : null
-          return { topic_id: t.topic_id, name: t.name, weight: Number(t.professor_weight ?? 0.5), mastery_pct: Math.round(Number(ms ?? 0) * 100) }
+          const m = Array.isArray(t.topic_mastery) ? t.topic_mastery[0] : null
+          // I1: time-decayed effective mastery — same number the app's scheduler uses.
+          const eff = effectiveMastery(m?.mastery_score, m?.last_updated)
+          return { topic_id: t.topic_id, name: t.name, weight: Number(t.professor_weight ?? 0.5), mastery_pct: Math.round(eff * 100) }
         })
         return asText({ topics: topicsOut, upcoming_exams: exams.data ?? [], pending_assignments: assignments.data ?? [] })
       }),
@@ -158,12 +160,13 @@ const handler = createMcpHandler(
       },
       guarded('get_weak_topics', 'read', async ({ course_id }: { course_id?: string }, userId) => {
         const service = createServiceClient()
-        let q = service.from('topics').select('topic_id, name, course_id, professor_weight, topic_mastery(mastery_score)').eq('user_id', userId)
+        let q = service.from('topics').select('topic_id, name, course_id, professor_weight, topic_mastery(mastery_score, last_updated)').eq('user_id', userId)
         if (course_id) q = q.eq('course_id', course_id)
         const { data } = await q
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const ranked = (data ?? []).map((t: any) => {
-          const ms = Number((Array.isArray(t.topic_mastery) ? t.topic_mastery[0]?.mastery_score : 0) ?? 0)
+          const m = Array.isArray(t.topic_mastery) ? t.topic_mastery[0] : null
+          const ms = effectiveMastery(m?.mastery_score, m?.last_updated) // I1: decayed
           const w = Number(t.professor_weight ?? 0.5)
           return { topic_id: t.topic_id, name: t.name, course_id: t.course_id, mastery_pct: Math.round(ms * 100), priority: w * (1 - ms) }
         }).sort((a: { priority: number }, b: { priority: number }) => b.priority - a.priority).slice(0, 8)

@@ -2,6 +2,7 @@ import { createServiceClient } from '@/lib/supabase/server'
 import { writeStudyBlocksToCalendar } from '@/lib/calendar'
 import { addDaysToDateKey, dateKeyInTimeZone, daysBetweenDateKeys } from '@/lib/time'
 import { prettifyTitle } from '@/lib/filename'
+import { effectiveMastery } from '@/lib/mastery'
 
 export type TaskItem =
   | {
@@ -61,6 +62,20 @@ function examUrgencyBonus(daysToExam: number | null): number {
   if (daysToExam <= 30) return 8
   return 0
 }
+
+// I3: weight exam urgency by how much of the grade it carries — a 40%-of-grade
+// final must dominate a 5% quiz (exams.grade_weight was extracted by the
+// profiler but previously UNUSED: both produced identical urgency).
+// null/0 weight (not stated on the syllabus) → neutral 1.0.
+function gradeWeightMultiplier(gradeWeight: number | null): number {
+  if (gradeWeight === null || gradeWeight <= 0) return 1
+  return clamp(0.5 + gradeWeight / 40, 0.5, 1.75) // 5% → 0.63, 20% → 1.0, 40%+ → 1.5+
+}
+
+// Cap how many review blocks land on one day (I3): a heavy day produces a
+// focused plan, not an unbounded wall the student abandons. Lower-urgency
+// course blocks defer — their cards stay due, so tomorrow's plan picks them up.
+const MAX_REVIEW_BLOCKS_PER_DAY = 4
 
 const clamp = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, n))
 
@@ -130,17 +145,24 @@ export async function runScheduler(userId: string): Promise<void> {
 
   const { data: exams } = await service
     .from('exams')
-    .select('course_id, date')
+    .select('course_id, date, grade_weight')
     .eq('user_id', userId)
     .gte('date', today)
     .order('date', { ascending: true })
 
   const nextExamByCourse: Record<string, number> = {}
+  const nextExamWeightByCourse: Record<string, number | null> = {}
   for (const exam of exams ?? []) {
     const days = daysBetweenDateKeys(today, exam.date)
     if (!(exam.course_id in nextExamByCourse) || days < nextExamByCourse[exam.course_id]) {
       nextExamByCourse[exam.course_id] = days
+      nextExamWeightByCourse[exam.course_id] = exam.grade_weight !== null ? Number(exam.grade_weight) : null
     }
+  }
+  // I3: exam urgency scaled by grade weight — a 40% final ≠ a 5% quiz.
+  const examUrgency = (courseId: string): number => {
+    const days = nextExamByCourse[courseId] ?? null
+    return examUrgencyBonus(days) * gradeWeightMultiplier(nextExamWeightByCourse[courseId] ?? null)
   }
 
   type CourseScore = {
@@ -185,14 +207,17 @@ export async function runScheduler(userId: string): Promise<void> {
   const { data: masteryRows } = allTopicIds.length > 0
     ? await service
         .from('topic_mastery')
-        .select('topic_id, mastery_score')
+        .select('topic_id, mastery_score, last_updated')
         .eq('user_id', userId)
         .in('topic_id', allTopicIds)
-    : { data: [] as { topic_id: string; mastery_score: number | null }[] }
+    : { data: [] as { topic_id: string; mastery_score: number | null; last_updated: string | null }[] }
 
+  // I1: deficits use EFFECTIVE mastery (time-decayed) — a topic crammed weeks
+  // ago and never revisited regains scheduling priority instead of sitting at
+  // its stale peak score forever.
   const masteryMap: Record<string, number> = {}
-  for (const m of (masteryRows ?? []) as { topic_id: string; mastery_score: number | null }[]) {
-    masteryMap[m.topic_id] = Number(m.mastery_score ?? 0)
+  for (const m of (masteryRows ?? []) as { topic_id: string; mastery_score: number | null; last_updated: string | null }[]) {
+    masteryMap[m.topic_id] = effectiveMastery(m.mastery_score, m.last_updated)
   }
 
   const dueCardsByCourse = new Map<string, { card_id: string; topic_id: string | null }[]>()
@@ -203,7 +228,10 @@ export async function runScheduler(userId: string): Promise<void> {
   }
 
   for (const course of courses) {
+    // I3: proximity × grade weight — a near 40% final pulls far more session
+    // minutes toward its course than a near 5% quiz.
     const multiplier = examProximityMultiplier(nextExamByCourse[course.course_id] ?? null)
+      * gradeWeightMultiplier(nextExamWeightByCourse[course.course_id] ?? null)
     const topics = topicsByCourse.get(course.course_id) ?? []
     if (topics.length === 0) continue
 
@@ -249,19 +277,23 @@ export async function runScheduler(userId: string): Promise<void> {
   // A zero-card course (e.g. high professor_weight + low mastery) would otherwise
   // surface a misleading "Flashcard review / No cards yet" task and dilute the
   // session-minute allocation owed to genuinely reviewable courses.
-  const reviewable = scored.filter(c => c.card_count > 0)
+  // I3: cap the blocks per day — lower-urgency courses defer (their cards stay
+  // due; tomorrow's plan picks them up) instead of producing an unbounded wall.
+  const reviewable = scored
+    .filter(c => c.card_count > 0)
+    .sort((a, b) => b.priority - a.priority)
+    .slice(0, MAX_REVIEW_BLOCKS_PER_DAY)
   if (reviewable.length > 0) {
     const totalPriority = reviewable.reduce((sum, c) => sum + c.priority, 0)
     reviewable
-      .sort((a, b) => b.priority - a.priority)
       .forEach((course, i) => {
         const share = totalPriority > 0 ? course.priority / totalPriority : 1 / reviewable.length
         const cappedShare = Math.min(0.7, Math.max(share, reviewable.length === 1 ? 1 : 0.1))
         const duration = Math.round(sessionMinutes * cappedShare)
         if (duration < 5) return
         const daysToExam = nextExamByCourse[course.course_id] ?? null
-        // Unified 0–100 urgency: mastery gap + exam proximity (comparable across task types).
-        const urgency = clamp(20 + examUrgencyBonus(daysToExam) + (1 - course.avg_mastery) * 25, 0, 95)
+        // Unified 0–100 urgency: mastery gap + grade-weighted exam proximity.
+        const urgency = clamp(20 + examUrgency(course.course_id) + (1 - course.avg_mastery) * 25, 0, 95)
         // One-line "why": cards due + the single strongest reason.
         let why = `${course.card_count} card${course.card_count === 1 ? '' : 's'} due`
         if (daysToExam !== null && daysToExam <= 14) {
@@ -341,9 +373,9 @@ export async function runScheduler(userId: string): Promise<void> {
         course_id: course.course_id,
         course_name: course.name,
         reason,
-        // Unified 0–100 urgency: an exam-imminent quiz ranks high; a routine
-        // "you're ready to test" quiz stays low (below active review work).
-        priority: examSoon ? clamp(40 + examUrgencyBonus(daysToExam), 40, 88) : 22,
+        // Unified 0–100 urgency: an exam-imminent quiz ranks high (scaled by
+        // grade weight); a routine "ready to test" quiz stays low.
+        priority: examSoon ? clamp(40 + examUrgency(course.course_id), 40, 88) : 22,
       })
     }
   }
