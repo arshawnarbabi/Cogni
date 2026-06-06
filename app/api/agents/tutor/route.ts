@@ -9,6 +9,7 @@ import {
   createSession,
   getOwnedSessionMessages,
   saveMessage,
+  deleteMessage,
   autoNameSession,
   type TutorMode,
 } from '@/lib/agents/tutor'
@@ -202,7 +203,9 @@ export async function POST(request: Request) {
   const savedUserContent = attachments.length > 0
     ? `[att:${attachments.map(a => a.name).join('|')}]\n${message}`
     : message
-  await saveMessage(sessionId, user.id, 'user', savedUserContent)
+  // Keep the id so a failed/empty generation can roll this row back (B7) — it
+  // counts against the daily quota and would otherwise replay as an unanswered turn.
+  const userMessageId = await saveMessage(sessionId, user.id, 'user', savedUserContent)
 
   const service2 = createServiceClient()
   const [{ data: courseRow }, { data: courseTopics }] = await Promise.all([
@@ -390,6 +393,9 @@ export async function POST(request: Request) {
   const readable = new ReadableStream({
     async start(controller) {
       let closed = false
+      // Set once the assistant turn is durably saved — the outer catch must NOT
+      // roll back the user message after a successful exchange (B7).
+      let assistantSaved = false
       try {
         const messages: Anthropic.MessageParam[] = [
           ...priorMessages.map((m: { role: string; content: string }) => ({
@@ -533,12 +539,16 @@ export async function POST(request: Request) {
                   ? input.topic_id
                   : null
 
-                // Save cards to flashcards table so they enter spaced repetition, then emit with card_ids
-                let savedData: { card_id: string; front: string; back: string }[] = input.cards.map(c => ({ card_id: '', front: c.front, back: c.back }))
+                // Save cards to flashcards table so they enter spaced repetition, then emit with card_ids.
+                // Honest persistence (B7): the supabase client RETURNS errors (it doesn't
+                // throw), so the old try/catch never caught a failed insert — the model
+                // and UI both claimed "saved" while nothing persisted.
+                let savedData: { card_id: string; front: string; back: string }[] = []
+                let cardsSaved = false
                 try {
                   const saveSvc = createServiceClient()
                   const defaults = newCardDefaults()
-                  const { data: inserted } = await saveSvc.from('flashcards').insert(
+                  const { data: inserted, error: insertError } = await saveSvc.from('flashcards').insert(
                     input.cards.map(card => ({
                       user_id: user.id,
                       course_id: courseId,
@@ -549,10 +559,14 @@ export async function POST(request: Request) {
                       ...defaults,
                     }))
                   ).select('card_id, front, back')
-                  if (inserted) savedData = inserted
+                  if (insertError) throw insertError
+                  if (inserted && inserted.length > 0) {
+                    savedData = inserted
+                    cardsSaved = true
+                  }
 
                   // Update content_coverage for the topic (gates simulated-exam eligibility).
-                  if (resolvedTopicId) {
+                  if (cardsSaved && resolvedTopicId) {
                     const { count: cardCount } = await saveSvc
                       .from('flashcards')
                       .select('card_id', { count: 'exact', head: true })
@@ -565,13 +579,19 @@ export async function POST(request: Request) {
                       .eq('topic_id', resolvedTopicId)
                       .eq('user_id', user.id)
                   }
-                } catch { /* non-critical */ }
+                } catch (e) {
+                  console.error('[tutor] flashcard save failed', e)
+                }
 
-                controller.enqueue(emit({ t: 'card', kind: 'flashcards', topic: input.topic, count: savedData.length, data: savedData }))
-                serverInlineCards.push({ type: 'flashcards', topic: input.topic, count: savedData.length, data: savedData })
-
-                const cardList = input.cards.map((c, i) => `${i + 1}. Front: ${c.front} | Back: ${c.back}`).join('\n')
-                toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: `Created ${input.cards.length} flashcards on "${input.topic}" and saved them to the student's deck. Tell the student they're ready and have been added to spaced repetition.\n\nCards you created:\n${cardList}` })
+                if (cardsSaved) {
+                  controller.enqueue(emit({ t: 'card', kind: 'flashcards', topic: input.topic, count: savedData.length, data: savedData }))
+                  serverInlineCards.push({ type: 'flashcards', topic: input.topic, count: savedData.length, data: savedData })
+                  const cardList = input.cards.map((c, i) => `${i + 1}. Front: ${c.front} | Back: ${c.back}`).join('\n')
+                  toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: `Created ${input.cards.length} flashcards on "${input.topic}" and saved them to the student's deck. Tell the student they're ready and have been added to spaced repetition.\n\nCards you created:\n${cardList}` })
+                } else {
+                  controller.enqueue(emit({ t: 'error', c: "Flashcards couldn't be saved — please ask the tutor to try again." }))
+                  toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: 'The flashcards could NOT be saved to the student\'s deck (database error). Tell the student saving failed and offer to try again — do NOT claim they were added to spaced repetition.' })
+                }
               } else if (block.name === 'create_quiz') {
                 const input = block.input as { topic: string; topic_id: string; questions: object[] }
                 controller.enqueue(emit({ t: 'card', kind: 'quiz', topic: input.topic, count: input.questions.length, data: input.questions }))
@@ -678,26 +698,37 @@ export async function POST(request: Request) {
             iterations,
           })
           controller.enqueue(emit({ t: 'error', c: `Empty response from model (${deepThink ? 'Opus 4.8' : 'Sonnet 4.6'}). Check server logs.` }))
-        }
+          // B7: don't persist a blank assistant turn (it replays as an empty bubble),
+          // and roll back the user message so the failed turn doesn't burn quota.
+          if (userMessageId) {
+            await deleteMessage(userMessageId, user.id).catch(e => console.error('[tutor] rollback delete failed', e))
+          }
+        } else {
+          // Persist the assistant turn BEFORE closing the stream, and never let a
+          // persistence failure abort the stream — the error event can still reach the
+          // client while the controller is open, and the catch below won't double-close.
+          try {
+            await saveMessage(sessionId, user.id, 'assistant', fullText, serverInlineCards.length > 0 ? serverInlineCards : null)
+            assistantSaved = true
+          } catch (saveErr) {
+            console.error('[tutor] saveMessage failed', saveErr)
+          }
 
-        // Persist the assistant turn BEFORE closing the stream, and never let a
-        // persistence failure abort the stream — the error event can still reach the
-        // client while the controller is open, and the catch below won't double-close.
-        try {
-          await saveMessage(sessionId, user.id, 'assistant', fullText, serverInlineCards.length > 0 ? serverInlineCards : null)
-        } catch (saveErr) {
-          console.error('[tutor] saveMessage failed', saveErr)
-        }
-
-        const isFirstExchange = priorMessages.length === 0
-        if (isFirstExchange) {
-          autoNameSession(sessionId, user.id, `Student: ${message}\nTutor: ${fullText}`, apiKey)
+          const isFirstExchange = priorMessages.length === 0
+          if (isFirstExchange) {
+            autoNameSession(sessionId, user.id, `Student: ${message}\nTutor: ${fullText}`, apiKey)
+          }
         }
 
         controller.close()
         closed = true
       } catch (err) {
         console.error('[tutor] stream error', err)
+        // B7: generation died before an assistant turn was saved → roll back the
+        // user message (no quota burn, no unanswered turn in history).
+        if (!assistantSaved && userMessageId) {
+          await deleteMessage(userMessageId, user.id).catch(e => console.error('[tutor] rollback delete failed', e))
+        }
         if (!closed) {
           // Never emit the raw exception/DB message to the client — it leaks internals.
           // The real cause is logged server-side above.

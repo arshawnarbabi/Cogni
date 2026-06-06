@@ -228,7 +228,7 @@ export async function getOrCreateSession(
     .gte('created_at', dayStart)
     .order('created_at', { ascending: false })
     .limit(1)
-    .single()
+    .maybeSingle() // .single() errors on zero rows — maybeSingle is the correct "find or none"
 
   if (existing) return existing.session_id
 
@@ -273,7 +273,7 @@ export async function saveMessage(
   role: 'user' | 'assistant',
   content: string,
   inlineCard?: object | object[] | null,
-) {
+): Promise<string | null> {
   const service = createServiceClient()
   const { data: session } = await service
     .from('session_log')
@@ -283,13 +283,26 @@ export async function saveMessage(
     .single()
   if (!session) throw new Error('Session not found')
   const hasCard = inlineCard != null && (!Array.isArray(inlineCard) || inlineCard.length > 0)
-  await service.from('session_messages').insert({
+  const { data: inserted } = await service.from('session_messages').insert({
     session_id: sessionId,
     user_id: userId,
     role,
     content,
     ...(hasCard ? { inline_card: inlineCard } : {}),
-  })
+  }).select('message_id').single()
+  return inserted?.message_id ?? null
+}
+
+// Remove a persisted turn — used to roll back the user message when generation
+// fails or returns empty (B7): a failed turn must not burn the daily message
+// quota (it counts role='user' rows) or replay as a question with no answer.
+export async function deleteMessage(messageId: string, userId: string): Promise<void> {
+  const service = createServiceClient()
+  await service
+    .from('session_messages')
+    .delete()
+    .eq('message_id', messageId)
+    .eq('user_id', userId)
 }
 
 export async function autoNameSession(sessionId: string, userId: string, firstExchange: string, apiKey: string) {
