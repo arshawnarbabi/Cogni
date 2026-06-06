@@ -957,6 +957,11 @@ grant execute on function public.review_card_atomic(
 -- RAG vector similarity search function
 -- Run in Supabase SQL Editor before using Phase 17 RAG features.
 
+-- I10: now returns the cosine similarity so callers can apply a relevance
+-- floor — "top-5 no matter how irrelevant" injected garbage as authoritative
+-- context when nothing matched. Return-type change requires a drop first.
+drop function if exists match_material_chunks(uuid, uuid, vector, integer);
+
 create or replace function match_material_chunks(
   p_user_id    uuid,
   p_course_id  uuid,
@@ -966,7 +971,8 @@ create or replace function match_material_chunks(
 returns table (
   material_id  uuid,
   chunk_index  integer,
-  content      text
+  content      text,
+  similarity   double precision
 )
 language sql
 stable
@@ -974,7 +980,8 @@ as $$
   select
     me.material_id,
     me.chunk_index,
-    me.content
+    me.content,
+    1 - (me.embedding <=> p_query_embedding) as similarity
   from material_embeddings me
   join materials m on m.material_id = me.material_id
   where me.user_id = p_user_id

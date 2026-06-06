@@ -10,7 +10,16 @@ export type RetrievedChunk = {
   material_id: string
   chunk_index: number
   content: string
+  similarity?: number
 }
+
+// I10: relevance floor for vector matches. Below this cosine similarity the
+// chunk is noise — injecting it as "authoritative course material" actively
+// misled the tutor (and billed the student for it). text-embedding-3-small
+// relevant matches typically land 0.3–0.6; 0.22 keeps borderline-but-real hits.
+const RAG_SIMILARITY_FLOOR = 0.22
+// Over-fetch so the floor has something to filter; return at most topK.
+const RAG_OVERFETCH = 3
 
 export function chunkText(text: string): { content: string; chunk_index: number }[] {
   const chunks: { content: string; chunk_index: number }[] = []
@@ -157,14 +166,25 @@ export async function retrieveChunksDetailed(
         p_user_id: userId,
         p_course_id: courseId,
         p_query_embedding: queryEmbedding,
-        p_top_k: topK,
+        p_top_k: Math.min(15, topK * RAG_OVERFETCH),
       })
 
       if (error) {
         console.error('[rag] vector search failed, falling back to keyword', error)
         degraded = true
-      } else if ((data ?? []).length > 0) {
-        return { chunks: data as RetrievedChunk[], reason: 'ok' }
+      } else {
+        // I10: drop sub-floor matches — when nothing relevant exists, returning
+        // NOTHING (with a truthful reason) beats 5 chunks of confident noise.
+        // Rows without a similarity column (pre-migration RPC) pass through.
+        const rows = (data ?? []) as RetrievedChunk[]
+        const relevant = rows.filter(r => r.similarity === undefined || r.similarity >= RAG_SIMILARITY_FLOOR)
+        if (relevant.length > 0) {
+          return { chunks: relevant.slice(0, topK), reason: 'ok' }
+        }
+        if (rows.length > 0) {
+          // Matches existed but all were noise — semantically nothing relevant.
+          return { chunks: [], reason: 'nothing_relevant' }
+        }
       }
     } catch (e) {
       // OpenAI outage / revoked key: previously this rejected all the way to the

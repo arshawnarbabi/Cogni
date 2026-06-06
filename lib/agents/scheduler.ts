@@ -3,6 +3,7 @@ import { writeStudyBlocksToCalendar } from '@/lib/calendar'
 import { addDaysToDateKey, dateKeyInTimeZone, daysBetweenDateKeys } from '@/lib/time'
 import { prettifyTitle } from '@/lib/filename'
 import { effectiveMastery } from '@/lib/mastery'
+import { computeExamReadiness, type ExamReadiness } from '@/lib/readiness'
 
 export type TaskItem =
   | {
@@ -86,15 +87,29 @@ function buildInsight(params: {
   totalDueCards: number
   pendingHomework: number
   hasStarted: boolean
+  examReadiness: ExamReadiness | null
 }): string {
-  const { nextExam, weakestTopic, totalDueCards, pendingHomework, hasStarted } = params
+  const { nextExam, weakestTopic, totalDueCards, pendingHomework, hasStarted, examReadiness } = params
+
+  // I11/I9: when readiness is computable, the insight answers the student's
+  // REAL question — "am I ready, and what do I fix first?" — instead of a
+  // generic countdown.
+  const readinessSuffix = (r: ExamReadiness | null): string => {
+    if (!r || !hasStarted) return ''
+    const weakest = r.weakest_topics[0]
+    const fix = weakest ? ` — weakest: ${weakest.name} (${weakest.mastery_pct}%)` : ''
+    return ` You're ~${r.readiness_pct}% ready${fix}.`
+  }
 
   if (nextExam && nextExam.daysAway <= 3) {
-    return `Your ${nextExam.courseName} exam is in ${nextExam.daysAway} day${nextExam.daysAway === 1 ? '' : 's'} — focus everything there today.`
+    return `Your ${nextExam.courseName} exam is in ${nextExam.daysAway} day${nextExam.daysAway === 1 ? '' : 's'} — focus everything there today.${readinessSuffix(examReadiness)}`
   }
   if (nextExam && nextExam.daysAway <= 7) {
-    const weak = hasStarted && weakestTopic ? ` Start with ${weakestTopic.topicName}.` : ''
-    return `${nextExam.courseName} exam in ${nextExam.daysAway} days — prioritize review sessions now.${weak}`
+    const weak = hasStarted && weakestTopic && !examReadiness ? ` Start with ${weakestTopic.topicName}.` : ''
+    return `${nextExam.courseName} exam in ${nextExam.daysAway} days — prioritize review sessions now.${weak}${readinessSuffix(examReadiness)}`
+  }
+  if (nextExam && nextExam.daysAway <= 14 && examReadiness && hasStarted && examReadiness.readiness_pct < 60) {
+    return `${nextExam.courseName} exam in ${nextExam.daysAway} days and you're only ~${examReadiness.readiness_pct}% ready — start with ${examReadiness.weakest_topics[0]?.name ?? 'your weakest topics'} today.`
   }
   // Brand-new: nothing reviewed yet. Frame it as a fresh start with a concrete next
   // step — NOT as a "weakest area" (every topic is 0% only because it's untouched).
@@ -467,6 +482,15 @@ export async function runScheduler(userId: string): Promise<void> {
     .gt('fsrs_reps', 0)
   const hasStarted = (reviewedCount ?? 0) > 0
 
+  // I11: readiness for the nearest exam (deterministic; ~3 extra queries, once
+  // per scheduler run). Non-fatal — the insight degrades to the countdown form.
+  let nearestReadiness: ExamReadiness | null = null
+  if (nextExamEntry && nextExamEntry[1] <= 14) {
+    nearestReadiness = await computeExamReadiness(userId, { courseId: nextExamEntry[0] })
+      .then(rs => rs[0] ?? null)
+      .catch(() => null)
+  }
+
   const insightText = buildInsight({
     courses,
     nextExam,
@@ -474,6 +498,7 @@ export async function runScheduler(userId: string): Promise<void> {
     totalDueCards,
     pendingHomework,
     hasStarted,
+    examReadiness: nearestReadiness,
   })
 
   const allTasks: TaskItem[] = [

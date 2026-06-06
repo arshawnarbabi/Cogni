@@ -339,6 +339,43 @@ alter table public.jobs drop constraint if exists jobs_kind_check;
 alter table public.jobs add constraint jobs_kind_check
   check (kind in ('profile', 'embed', 'flashcards', 'distill'));
 
+-- ── I10: RAG similarity floor — match_material_chunks returns similarity ────
+-- I10: now returns the cosine similarity so callers can apply a relevance
+-- floor — "top-5 no matter how irrelevant" injected garbage as authoritative
+-- context when nothing matched. Return-type change requires a drop first.
+drop function if exists match_material_chunks(uuid, uuid, vector, integer);
+
+create or replace function match_material_chunks(
+  p_user_id    uuid,
+  p_course_id  uuid,
+  p_query_embedding vector(1536),
+  p_top_k      integer default 5
+)
+returns table (
+  material_id  uuid,
+  chunk_index  integer,
+  content      text,
+  similarity   double precision
+)
+language sql
+stable
+as $$
+  select
+    me.material_id,
+    me.chunk_index,
+    me.content,
+    1 - (me.embedding <=> p_query_embedding) as similarity
+  from material_embeddings me
+  join materials m on m.material_id = me.material_id
+  where me.user_id = p_user_id
+    and m.course_id = p_course_id
+    and me.embedding is not null
+  order by me.embedding <=> p_query_embedding
+  limit p_top_k;
+$$;
+
+grant execute on function match_material_chunks(uuid, uuid, vector, integer) to service_role;
+
 -- PostgREST must see the new unique indexes + function signature before the
 -- app's upsert-on-conflict / RPC calls work.
 notify pgrst, 'reload schema';

@@ -234,9 +234,26 @@ export async function POST(request: Request) {
   const TRIVIAL_TURN_RE = /^(yes|yeah|yep|no|nope|nah|ok|okay|sure|thanks|thank you|got it|go on|continue|next|cool|nice|great|hm+|wait)\b[\s!.?]*$/i
   const skipRag = message.trim().length < 4 || TRIVIAL_TURN_RE.test(message.trim())
 
-  const [systemPrompt, history] = await Promise.all([
+  // History first: the retrieval query needs conversational context (I10) and
+  // compaction needs the transcript. The prompt build and the compaction then
+  // run in parallel.
+  const history = await getOwnedSessionMessages(sessionId, user.id)
+  // In essay mode, historyCutoff is set when the user switches assistance levels —
+  // messages before the cutoff are excluded so prior-mode behavior doesn't bleed over.
+  const fullPrior = history.slice(historyCutoff, -1)
+
+  // I10: short follow-ups ("why?", "what about x?") embed terribly on their own —
+  // retrieval found nothing useful for exactly the turns that need grounding most.
+  // Prefix the previous user message so the query carries the subject.
+  const lastUserContent = [...fullPrior].reverse()
+    .find((m: { role: string }) => m.role === 'user')?.content?.replace(/^\[att:[^\]]+\]\n/, '')
+  const retrievalQuery = !skipRag && message.trim().length < 30 && lastUserContent
+    ? `${lastUserContent.slice(0, 300)}\n${message}`
+    : message
+
+  const [systemPrompt, compacted] = await Promise.all([
     (async () => {
-      const ragChunks = skipRag ? [] : await retrieveChunks(message, courseId, user.id, 5).catch(() => [])
+      const ragChunks = skipRag ? [] : await retrieveChunks(retrievalQuery, courseId, user.id, 5).catch(() => [])
       const ragContext = ragChunks.length > 0
         ? ragChunks.map(c => c.content).join('\n\n---\n\n')
         : undefined
@@ -250,19 +267,13 @@ export async function POST(request: Request) {
         isSessionOpen,
       })
     })(),
-    getOwnedSessionMessages(sessionId, user.id),
+    // M6: long sessions no longer re-send the whole transcript every turn — the
+    // older prefix is compacted into a cached brief; the recent window is verbatim.
+    compactHistory(user.id, sessionId, fullPrior as { role: string; content: string }[], apiKey),
   ])
 
   const client = new Anthropic({ apiKey })
-  // In essay mode, historyCutoff is set when the user switches assistance levels —
-  // messages before the cutoff are excluded so prior-mode behavior doesn't bleed over.
-  const fullPrior = history.slice(historyCutoff, -1)
-
-  // M6: long sessions no longer re-send the whole transcript every turn — the
-  // older prefix is compacted into a cached brief; the recent window is verbatim.
-  const { summaryBlock: historySummary, messages: priorMessages } = await compactHistory(
-    user.id, sessionId, fullPrior as { role: string; content: string }[], apiKey,
-  )
+  const { summaryBlock: historySummary, messages: priorMessages } = compacted
 
   // Inject essay content as context prefix when in essay mode
   const effectiveMessage = essayContent
