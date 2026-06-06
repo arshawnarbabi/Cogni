@@ -97,7 +97,9 @@ export function FlashcardViewer({ cards, topic, onClose, onComplete }: Props) {
         const res = await fetch('/api/cards/review', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ cardId: card.card_id, rating }),
+          // clientReviewId: one uuid per rating tap — a network-level retry/replay
+          // of this POST applies exactly once server-side (B6).
+          body: JSON.stringify({ cardId: card.card_id, rating, clientReviewId: crypto.randomUUID() }),
         })
         if (!res.ok) {
           const body = await res.json().catch(() => ({}))

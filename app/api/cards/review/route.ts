@@ -4,12 +4,23 @@ import { flashcardEvidence } from '@/lib/mastery'
 import { NextResponse } from 'next/server'
 import { serverError } from '@/lib/api-error'
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
 export async function POST(request: Request) {
-  const { cardId, rating } = await request.json() as { cardId: string; rating: 1 | 2 | 3 | 4 }
+  const { cardId, rating, clientReviewId } = await request.json() as {
+    cardId: string
+    rating: 1 | 2 | 3 | 4
+    clientReviewId?: string
+  }
 
   if (!cardId || ![1, 2, 3, 4].includes(rating)) {
     return NextResponse.json({ error: 'Invalid payload' }, { status: 400 })
   }
+
+  // Idempotency key (B6): the client generates one uuid per rating tap; a
+  // retried/replayed POST carries the same id and the RPC applies it exactly
+  // once. Absent/malformed → null (legacy behavior, no dedup).
+  const reviewId = typeof clientReviewId === 'string' && UUID_RE.test(clientReviewId) ? clientReviewId : null
 
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
@@ -72,6 +83,8 @@ export async function POST(request: Request) {
     p_fsrs_next_review_date: next.fsrs_next_review_date,
     p_observed: observed,
     p_learning_rate: learningRate,
+    p_rating: rating,
+    p_client_review_id: reviewId,
   })
 
   if (rpcError) {

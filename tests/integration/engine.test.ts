@@ -34,7 +34,7 @@ describe('review_card_atomic RPC (evidence model, F3)', () => {
       p_card_id: seed.cards[0], p_user_id: seed.userId,
       p_fsrs_stability: 12.3, p_fsrs_difficulty: 6.1, p_fsrs_reps: 99, p_fsrs_lapses: 1,
       p_fsrs_state: 'review', p_fsrs_last_review: new Date().toISOString(),
-      p_fsrs_next_review_date: '2099-01-01', p_observed: 0.75, p_learning_rate: 0.2,
+      p_fsrs_next_review_date: '2099-01-01', p_observed: 0.75, p_learning_rate: 0.2, p_rating: 3, p_client_review_id: crypto.randomUUID(),
     })
     expect(error).toBeNull()
 
@@ -56,7 +56,7 @@ describe('review_card_atomic RPC (evidence model, F3)', () => {
       p_card_id: seed.cards[1], p_user_id: seed.userId,
       p_fsrs_stability: 1, p_fsrs_difficulty: 5, p_fsrs_reps: 1, p_fsrs_lapses: 0,
       p_fsrs_state: 'learning', p_fsrs_last_review: new Date().toISOString(),
-      p_fsrs_next_review_date: '2099-02-02', p_observed: 0.75, p_learning_rate: 0.2,
+      p_fsrs_next_review_date: '2099-02-02', p_observed: 0.75, p_learning_rate: 0.2, p_rating: 3, p_client_review_id: crypto.randomUUID(),
     })
     expect(error).toBeNull()
     expect(await masteryOf(topic)).toBeCloseTo(0.75, 5) // recreated at observed, not no-op
@@ -69,7 +69,7 @@ describe('review_card_atomic RPC (evidence model, F3)', () => {
       p_card_id: seed.cards[0], p_user_id: seed.userId,
       p_fsrs_stability: 1, p_fsrs_difficulty: 5, p_fsrs_reps: 2, p_fsrs_lapses: 0,
       p_fsrs_state: 'review', p_fsrs_last_review: new Date().toISOString(),
-      p_fsrs_next_review_date: '2099-03-03', p_observed: 1.0, p_learning_rate: 0.25,
+      p_fsrs_next_review_date: '2099-03-03', p_observed: 1.0, p_learning_rate: 0.25, p_rating: 4, p_client_review_id: crypto.randomUUID(),
     })
     // 0.95 + 0.25 * (1.0 - 0.95) = 0.9625
     const m = await masteryOf(topic)
@@ -88,9 +88,41 @@ describe('review_card_atomic RPC (evidence model, F3)', () => {
       p_card_id: seed.cards[0], p_user_id: '00000000-0000-0000-0000-000000000000',
       p_fsrs_stability: 1, p_fsrs_difficulty: 5, p_fsrs_reps: 1, p_fsrs_lapses: 0,
       p_fsrs_state: 'review', p_fsrs_last_review: new Date().toISOString(),
-      p_fsrs_next_review_date: '2099-01-01', p_observed: 0.75, p_learning_rate: 0.2,
+      p_fsrs_next_review_date: '2099-01-01', p_observed: 0.75, p_learning_rate: 0.2, p_rating: 3, p_client_review_id: crypto.randomUUID(),
     })
     expect(error).not.toBeNull() // "card not found or not owned by user"
+  })
+
+  it('applies a replayed client_review_id exactly ONCE (B6 idempotency)', async () => {
+    const topic = seed.topics.kinematics
+    await db.from('topic_mastery').upsert(
+      { user_id: seed.userId, topic_id: topic, mastery_score: 0.5, confidence: 0 },
+      { onConflict: 'user_id,topic_id' },
+    )
+    const before = await historyCount(topic)
+    const reviewId = crypto.randomUUID()
+    const params = {
+      p_card_id: seed.cards[0], p_user_id: seed.userId,
+      p_fsrs_stability: 2, p_fsrs_difficulty: 5, p_fsrs_reps: 3, p_fsrs_lapses: 0,
+      p_fsrs_state: 'review', p_fsrs_last_review: new Date().toISOString(),
+      p_fsrs_next_review_date: '2099-04-04', p_observed: 0.75, p_learning_rate: 0.2,
+      p_rating: 3, p_client_review_id: reviewId,
+    }
+
+    const first = await db.rpc('review_card_atomic', params)
+    expect(first.error).toBeNull()
+    const masteryAfterFirst = await masteryOf(topic)
+
+    // Replay: same client_review_id — must be a no-op, not a second application.
+    const second = await db.rpc('review_card_atomic', params)
+    expect(second.error).toBeNull()
+
+    expect(await masteryOf(topic)).toBeCloseTo(masteryAfterFirst!, 5) // unchanged
+    expect(await historyCount(topic)).toBe(before + 1)                // exactly one history row
+    const { count: logCount } = await db.from('review_logs')
+      .select('*', { count: 'exact', head: true })
+      .eq('client_review_id', reviewId)
+    expect(logCount).toBe(1)                                          // exactly one log row
   })
 })
 
