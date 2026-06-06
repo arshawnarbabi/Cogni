@@ -45,6 +45,43 @@ export function scheduleReview(
   return dbFromCard(next, { clampToTomorrow: true, timeZone })
 }
 
+/**
+ * Current FSRS retrievability (probability of recall, 0..1) for a stored card.
+ * I4: the review queue front-loads the cards MOST at risk of being forgotten —
+ * raw due-date order treats a card 1 day overdue the same as one 3 weeks
+ * overdue. New/never-reviewed cards return 0 (must be (re)learned).
+ */
+export function cardRetrievability(dbCard: {
+  fsrs_stability: number | null
+  fsrs_difficulty: number | null
+  fsrs_reps: number
+  fsrs_lapses: number
+  fsrs_state: string
+  fsrs_last_review: string | null
+  fsrs_next_review_date: string
+}): number {
+  if (!dbCard.fsrs_last_review || dbCard.fsrs_state === 'new') return 0
+  const stateMap: Record<string, number> = { new: 0, learning: 1, review: 2, relearning: 3 }
+  const card: Card = {
+    due: new Date(dbCard.fsrs_next_review_date),
+    stability: Number(dbCard.fsrs_stability ?? 0),
+    difficulty: Number(dbCard.fsrs_difficulty ?? 5),
+    elapsed_days: 0,
+    scheduled_days: 0,
+    reps: dbCard.fsrs_reps,
+    lapses: dbCard.fsrs_lapses,
+    learning_steps: 0,
+    state: stateMap[dbCard.fsrs_state] ?? 0,
+    last_review: new Date(dbCard.fsrs_last_review),
+  }
+  try {
+    const r = f.get_retrievability(card, new Date(), false)
+    return typeof r === 'number' && Number.isFinite(r) ? Math.min(1, Math.max(0, r)) : 0
+  } catch {
+    return 0
+  }
+}
+
 function dbFromCard(card: Card, opts: { clampToTomorrow?: boolean; timeZone?: string } = {}) {
   const stateLabel = ['new', 'learning', 'review', 'relearning'][card.state] ?? 'new'
   // fsrs_next_review_date is a date column, but ts-fsrs schedules learning-phase

@@ -2,6 +2,8 @@ import { createClient, createServiceClient } from '@/lib/supabase/server'
 import { redirect } from 'next/navigation'
 import { ReviewClient } from './_client'
 import { dateKeyInTimeZone } from '@/lib/time'
+import { cardRetrievability } from '@/lib/fsrs'
+import { effectiveMastery } from '@/lib/mastery'
 
 export const dynamic = 'force-dynamic'
 
@@ -42,31 +44,38 @@ export default async function ReviewPage({ searchParams }: { searchParams: Searc
     redirect(courseId ? '/courses' : '/today')
   }
 
-  type ReviewCardRow = { card_id: string; front: string; back: string; hint: string | null; topic_id: string | null }
+  type ReviewCardRow = {
+    card_id: string; front: string; back: string; hint: string | null; topic_id: string | null
+    fsrs_stability: number | null; fsrs_difficulty: number | null; fsrs_reps: number
+    fsrs_lapses: number; fsrs_state: string; fsrs_last_review: string | null; fsrs_next_review_date: string
+  }
   const cardRows = cards as ReviewCardRow[]
 
-  // Front-load the session by priority — high professor_weight × low mastery first —
-  // so if the student only finishes part of it, they've covered the highest-leverage
-  // material. Ties fall back to the due-date order from the query.
+  // Front-load the session by priority: topic leverage (professor_weight × low
+  // effective mastery, I1) PLUS forgetting risk (I4: low FSRS retrievability —
+  // a card 3 weeks overdue is far closer to forgotten than one due today, but
+  // raw due-date order treated them the same). If the student only finishes
+  // part of the session, they've covered what they were most about to lose.
   const topicIds = [...new Set(cardRows.map(c => c.topic_id).filter(Boolean) as string[])]
   const weightByTopic = new Map<string, number>()
   const masteryByTopic = new Map<string, number>()
   if (topicIds.length > 0) {
     const [tw, tm] = await Promise.all([
       service.from('topics').select('topic_id, professor_weight').in('topic_id', topicIds),
-      service.from('topic_mastery').select('topic_id, mastery_score').eq('user_id', user.id).in('topic_id', topicIds),
+      service.from('topic_mastery').select('topic_id, mastery_score, last_updated').eq('user_id', user.id).in('topic_id', topicIds),
     ])
     for (const t of (tw.data ?? []) as { topic_id: string; professor_weight: number | null }[]) {
       weightByTopic.set(t.topic_id, Number(t.professor_weight ?? 0.5))
     }
-    for (const m of (tm.data ?? []) as { topic_id: string; mastery_score: number | null }[]) {
-      masteryByTopic.set(m.topic_id, Number(m.mastery_score ?? 0))
+    for (const m of (tm.data ?? []) as { topic_id: string; mastery_score: number | null; last_updated: string | null }[]) {
+      masteryByTopic.set(m.topic_id, effectiveMastery(m.mastery_score, m.last_updated))
     }
   }
   const cardPriority = (c: ReviewCardRow): number => {
     const w = c.topic_id ? (weightByTopic.get(c.topic_id) ?? 0.5) : 0.4
     const ms = c.topic_id ? (masteryByTopic.get(c.topic_id) ?? 0) : 0
-    return w * (1 - ms)
+    const atRisk = 1 - cardRetrievability(c) // 0 = fresh in memory, 1 = forgotten
+    return w * (1 - ms) + 0.5 * atRisk
   }
   const ordered = cardRows
     .map((c, i) => ({ c, i, p: cardPriority(c) }))

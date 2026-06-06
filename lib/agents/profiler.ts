@@ -6,6 +6,7 @@ import { retrieveChunks, processEmbeddings } from '@/lib/rag'
 import { requireOwnedCourse } from '@/lib/authz'
 import { extractText, buildVisualBlock, extractContentFromVision } from '@/lib/extract-text'
 import { withRetry } from '@/lib/ai/call'
+import { effectiveMastery } from '@/lib/mastery'
 
 // Character budgets for syllabus prompts. Previously 12k/10k chars, which silently
 // dropped the tail of long syllabi — and syllabi are chronological, so the tail is
@@ -209,7 +210,8 @@ function extractTutorInsights(existingProfile: string | null): string[] {
 async function buildLearningProfile(userId: string): Promise<string> {
   const service = createServiceClient()
 
-  const [{ data: courses }, existingProfile] = await Promise.all([
+  const fourteenDaysAgo = new Date(Date.now() - 14 * 86_400_000).toISOString()
+  const [{ data: courses }, existingProfile, { data: masteryRows }, { data: memories }, { count: recentReviews }] = await Promise.all([
     service
       .from('courses')
       .select(`
@@ -221,6 +223,9 @@ async function buildLearningProfile(userId: string): Promise<string> {
       .eq('user_id', userId)
       .eq('active_status', 'active'),
     readWikiFile(userId, 'learning_profile.md').catch(() => null),
+    service.from('topic_mastery').select('mastery_score, last_updated, topics(name)').eq('user_id', userId),
+    service.from('student_memory').select('kind, content').eq('user_id', userId).order('last_seen', { ascending: false }).limit(20),
+    service.from('review_logs').select('log_id', { count: 'exact', head: true }).eq('user_id', userId).gte('reviewed_at', fourteenDaysAgo),
   ])
 
   const tutorInsights = extractTutorInsights(existingProfile)
@@ -243,8 +248,34 @@ async function buildLearningProfile(userId: string): Promise<string> {
     lines.push('')
   }
 
-  lines.push('## Strengths', '*Will be updated as you study.*', '')
-  lines.push('## Study Preferences', '*Derived from session history over time.*', '')
+  // M12: synthesize from REAL data (this section previously shipped literal
+  // placeholder text — "*Will be updated as you study.*" — forever).
+  type ProfMasteryRow = { mastery_score: number | null; last_updated: string | null; topics: { name: string } | null }
+  const ranked = ((masteryRows ?? []) as ProfMasteryRow[])
+    .filter(m => m.topics)
+    .map(m => ({ name: m.topics!.name, eff: effectiveMastery(m.mastery_score, m.last_updated) }))
+    .sort((a, b) => b.eff - a.eff)
+
+  const strengths = ranked.filter(t => t.eff >= 0.55).slice(0, 4)
+  const struggles = [...ranked].reverse().filter(t => t.eff < 0.45 && t.eff > 0).slice(0, 4)
+  lines.push('## Strengths')
+  lines.push(strengths.length > 0
+    ? strengths.map(t => `- ${t.name} (${Math.round(t.eff * 100)}%)`).join('\n')
+    : '*No demonstrated strengths yet — they appear as mastery builds.*')
+  lines.push('')
+  if (struggles.length > 0) {
+    lines.push('## Working on', struggles.map(t => `- ${t.name} (${Math.round(t.eff * 100)}%)`).join('\n'), '')
+  }
+
+  const prefs = ((memories ?? []) as { kind: string; content: string }[]).filter(m => m.kind === 'preference').slice(0, 5)
+  const misconceptions = ((memories ?? []) as { kind: string; content: string }[]).filter(m => m.kind === 'misconception').slice(0, 5)
+  lines.push('## Study Preferences')
+  lines.push(prefs.length > 0 ? prefs.map(p => `- ${p.content}`).join('\n') : '*None recorded yet.*')
+  lines.push('')
+  if (misconceptions.length > 0) {
+    lines.push('## Recurring misconceptions', misconceptions.map(m => `- ${m.content}`).join('\n'), '')
+  }
+  lines.push('## Study cadence', `- ${recentReviews ?? 0} card reviews in the last 14 days`, '')
 
   if (tutorInsights.length > 0) {
     lines.push('## Observed Patterns', '', ...tutorInsights, '')
