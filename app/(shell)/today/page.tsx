@@ -26,6 +26,9 @@ export default async function TodayPage() {
 
   const service = createServiceClient()
 
+  // maybeSingle() everywhere: a partially-provisioned account (users row or plan
+  // missing) must degrade, not throw — .single() errors hard-500'd the most-visited
+  // page for exactly those accounts (B9).
   const [
     { data: userRow },
     { data: plan },
@@ -33,10 +36,10 @@ export default async function TodayPage() {
     apiKey,
     { data: courses },
   ] = await Promise.all([
-    service.from('users').select('display_name, study_streak, last_study_date, timezone').eq('user_id', user.id).single(),
-    service.from('study_plan').select('tasks').eq('user_id', user.id).eq('plan_date', dateKeyInTimeZone(new Date(), 'UTC')).single(),
+    service.from('users').select('display_name, study_streak, last_study_date, timezone').eq('user_id', user.id).maybeSingle(),
+    service.from('study_plan').select('tasks').eq('user_id', user.id).eq('plan_date', dateKeyInTimeZone(new Date(), 'UTC')).maybeSingle(),
     service.from('inbox_items').select('inbox_item_id').eq('user_id', user.id).in('classification_status', ['pending', 'unassigned']),
-    getUserApiKey(user.id),
+    getUserApiKey(user.id).catch(() => null),
     service.from('courses').select('course_id, name, icon, icon_color').eq('user_id', user.id).eq('active_status', 'active'),
   ])
 
@@ -49,7 +52,7 @@ export default async function TodayPage() {
       .select('tasks')
       .eq('user_id', user.id)
       .eq('plan_date', today)
-      .single()
+      .maybeSingle()
     planData = localPlan
   }
 
@@ -64,21 +67,31 @@ export default async function TodayPage() {
     (c: { course_id: string; name: string }) => !coursesWithSyllabus.has(c.course_id)
   ) as { course_id: string; name: string }[]
 
-  // Run nudge checks and fetch top nudge
-  await runNudgeChecks(user.id)
-  const activeNudge: ActiveNudge | null = await getTopNudge(user.id)
+  // Run nudge checks and fetch top nudge. Both are degradable: a nudge/scheduler
+  // failure must never take down the dashboard (B9) — render what we have.
+  let activeNudge: ActiveNudge | null = null
+  try {
+    await runNudgeChecks(user.id)
+    activeNudge = await getTopNudge(user.id)
+  } catch (e) {
+    console.error('[today] nudge checks failed (degraded render)', e)
+  }
 
   // Auto-generate today's plan if none exists
   let tasks: TaskItem[] = []
   if (!planData) {
-    await runScheduler(user.id)
-    const { data: fresh } = await service
-      .from('study_plan')
-      .select('tasks')
-      .eq('user_id', user.id)
-      .eq('plan_date', today)
-      .single()
-    tasks = (fresh?.tasks as TaskItem[]) ?? []
+    try {
+      await runScheduler(user.id)
+      const { data: fresh } = await service
+        .from('study_plan')
+        .select('tasks')
+        .eq('user_id', user.id)
+        .eq('plan_date', today)
+        .maybeSingle()
+      tasks = (fresh?.tasks as TaskItem[]) ?? []
+    } catch (e) {
+      console.error('[today] scheduler failed (degraded render)', e)
+    }
   } else {
     tasks = (planData.tasks as TaskItem[]) ?? []
   }

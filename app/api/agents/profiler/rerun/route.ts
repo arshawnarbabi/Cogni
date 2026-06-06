@@ -42,6 +42,15 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'No Tier 1 (syllabus) material found for this course' }, { status: 404 })
   }
 
-  await runProfiler(user.id, material.material_id, courseId, course.name)
+  // Embed only if this syllabus has no chunks yet (covers syllabi from the
+  // pre-B1-fix onboarding/create paths retroactively, without re-paying the
+  // embedding bill for inbox-path materials that already have them).
+  const { count: chunkCount } = await service
+    .from('material_embeddings')
+    .select('embedding_id', { count: 'exact', head: true })
+    .eq('material_id', material.material_id)
+    .eq('user_id', user.id)
+
+  await runProfiler(user.id, material.material_id, courseId, course.name, { embed: (chunkCount ?? 0) === 0 })
   return NextResponse.json({ ok: true })
 }

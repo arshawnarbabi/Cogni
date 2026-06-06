@@ -109,41 +109,103 @@ export async function processEmbeddings(
   }
 }
 
+// Why a retrieval came back empty (or didn't). Callers surface these distinctly:
+// "connect an OpenAI key" vs "upload materials" vs "nothing matched" are different
+// user actions — previously all three collapsed into a silent [] (verified bug B10).
+export type RetrievalReason =
+  | 'ok'               // chunks found
+  | 'no_materials'     // the course has no stored material chunks at all
+  | 'no_openai_key'    // no key → only keyword search ran, and it found nothing
+  | 'nothing_relevant' // search ran fine; nothing matched the query
+  | 'rag_error'        // embedding/vector search failed; keyword fallback also empty
+
+export type RetrievalResult = {
+  chunks: RetrievedChunk[]
+  reason: RetrievalReason
+}
+
+export async function retrieveChunksDetailed(
+  query: string,
+  courseId: string,
+  userId: string,
+  topK = 5
+): Promise<RetrievalResult> {
+  const openaiKey = await getUserKey(userId, 'openai_key')
+  const service = createServiceClient()
+
+  let degraded = false // vector path failed → empty results are 'rag_error', not 'nothing_relevant'
+
+  if (openaiKey) {
+    try {
+      const { default: OpenAI } = await import('openai')
+      const openai = new OpenAI({ apiKey: openaiKey })
+
+      const embeddingResponse = await openai.embeddings.create({
+        model: 'text-embedding-3-small',
+        input: query.slice(0, 2000),
+      })
+      const queryEmbedding = embeddingResponse.data[0].embedding
+
+      const { data, error } = await service.rpc('match_material_chunks', {
+        p_user_id: userId,
+        p_course_id: courseId,
+        p_query_embedding: queryEmbedding,
+        p_top_k: topK,
+      })
+
+      if (error) {
+        console.error('[rag] vector search failed, falling back to keyword', error)
+        degraded = true
+      } else if ((data ?? []).length > 0) {
+        return { chunks: data as RetrievedChunk[], reason: 'ok' }
+      }
+    } catch (e) {
+      // OpenAI outage / revoked key: previously this rejected all the way to the
+      // caller's .catch(()=>[]), indistinguishable from "no relevant material".
+      console.error('[rag] query embedding failed, falling back to keyword', e)
+      degraded = true
+    }
+  }
+
+  const keyword = await keywordFallback(query, courseId, userId, topK)
+  if (keyword.length > 0) return { chunks: keyword, reason: 'ok' }
+
+  // Nothing found anywhere — figure out why so the user gets an actionable answer.
+  const { count } = await service
+    .from('material_embeddings')
+    .select('embedding_id', { count: 'exact', head: true })
+    .eq('user_id', userId)
+    .in('material_id', await courseMaterialIds(service, courseId, userId))
+
+  if ((count ?? 0) === 0) return { chunks: [], reason: 'no_materials' }
+  if (degraded) return { chunks: [], reason: 'rag_error' }
+  if (!openaiKey) return { chunks: [], reason: 'no_openai_key' }
+  return { chunks: [], reason: 'nothing_relevant' }
+}
+
+async function courseMaterialIds(
+  service: ReturnType<typeof createServiceClient>,
+  courseId: string,
+  userId: string,
+): Promise<string[]> {
+  const { data } = await service
+    .from('materials')
+    .select('material_id')
+    .eq('course_id', courseId)
+    .eq('user_id', userId)
+  const ids = (data ?? []).map((m: { material_id: string }) => m.material_id)
+  // .in() with an empty array matches nothing, but pass a sentinel to be explicit.
+  return ids.length > 0 ? ids : ['00000000-0000-0000-0000-000000000000']
+}
+
 export async function retrieveChunks(
   query: string,
   courseId: string,
   userId: string,
   topK = 5
 ): Promise<RetrievedChunk[]> {
-  const openaiKey = await getUserKey(userId, 'openai_key')
-  const service = createServiceClient()
-
-  if (openaiKey) {
-    const { default: OpenAI } = await import('openai')
-    const openai = new OpenAI({ apiKey: openaiKey })
-
-    const embeddingResponse = await openai.embeddings.create({
-      model: 'text-embedding-3-small',
-      input: query.slice(0, 2000),
-    })
-    const queryEmbedding = embeddingResponse.data[0].embedding
-
-    const { data, error } = await service.rpc('match_material_chunks', {
-      p_user_id: userId,
-      p_course_id: courseId,
-      p_query_embedding: queryEmbedding,
-      p_top_k: topK,
-    })
-
-    if (error) {
-      console.error('[rag] vector search failed, falling back to keyword', error)
-      return keywordFallback(query, courseId, userId, topK)
-    }
-
-    return (data ?? []) as RetrievedChunk[]
-  }
-
-  return keywordFallback(query, courseId, userId, topK)
+  const { chunks } = await retrieveChunksDetailed(query, courseId, userId, topK)
+  return chunks
 }
 
 async function keywordFallback(

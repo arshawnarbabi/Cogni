@@ -152,7 +152,9 @@ export async function POST(request: Request) {
     // onboarding). The course is already created; only enrichment is skipped.
     if (await consumeAiQuota(user.id, 'profiler')) {
       try {
-        await runProfiler(user.id, material.material_id, courseId, name)
+        // embed: this insert path skips the inbox pipeline, so the profiler must
+        // embed the syllabus for RAG (it was previously never embedded).
+        await runProfiler(user.id, material.material_id, courseId, name, { embed: true })
       } catch (e) {
         console.error('[courses/create] profiler failed', e)
       }

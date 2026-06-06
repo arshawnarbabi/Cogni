@@ -8,6 +8,7 @@ import { runFlashcardAgent } from '@/lib/agents/flashcard'
 import { processEmbeddings } from '@/lib/rag'
 import { requireOwnedCourse } from '@/lib/authz'
 import { consumeAiQuota } from '@/lib/rate-limit'
+import { extractText, buildVisualBlock, extractContentFromVision } from '@/lib/extract-text'
 
 type ClassifyResult = {
   courseId: string | null
@@ -16,66 +17,6 @@ type ClassifyResult = {
   isHomework: boolean
   dueDate: string | null
   dismissed?: boolean
-}
-
-type ExtractResult = {
-  text: string
-  isImagePdf: boolean
-  isImageFile: boolean
-  imageMimeType?: 'image/jpeg' | 'image/png' | 'image/webp'
-}
-
-const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'webp'])
-const MAX_IMAGE_BYTES = 4 * 1024 * 1024 // 4MB — Anthropic limit is ~5MB
-
-async function compressImageIfNeeded(
-  buffer: Buffer,
-  mimeType: 'image/jpeg' | 'image/png' | 'image/webp',
-): Promise<{ buffer: Buffer; mimeType: 'image/jpeg' | 'image/png' | 'image/webp' }> {
-  if (buffer.length <= MAX_IMAGE_BYTES) return { buffer, mimeType }
-  try {
-    // sharp is native and optional at runtime — lazy-load so a missing binary can't crash the route on import
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const sharp = require('sharp')
-    const compressed: Buffer = await sharp(buffer)
-      .resize({ width: 2000, height: 2000, fit: 'inside', withoutEnlargement: true })
-      .jpeg({ quality: 80 })
-      .toBuffer()
-    return { buffer: compressed, mimeType: 'image/jpeg' }
-  } catch {
-    return { buffer, mimeType }
-  }
-}
-
-async function extractText(buffer: Buffer, fileType: string, filename: string): Promise<ExtractResult> {
-  const ext = fileType.toLowerCase().replace('.', '')
-
-  if (ext === 'txt' || ext === 'md' || filename.endsWith('.txt') || filename.endsWith('.md')) {
-    return { text: buffer.toString('utf-8'), isImagePdf: false, isImageFile: false }
-  }
-
-  if (ext === 'pdf' || filename.endsWith('.pdf')) {
-    try {
-      // pdf-parse must be lazy-loaded via require — its top-level code crashes at import time
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const pdfParse = require('pdf-parse')
-      const data = await pdfParse(buffer)
-      const meaningful = (data.text ?? '').replace(/\s+/g, '').length
-      const isImagePdf = meaningful < 50
-      return { text: data.text ?? '', isImagePdf, isImageFile: false }
-    } catch {
-      return { text: '', isImagePdf: true, isImageFile: false }
-    }
-  }
-
-  if (IMAGE_EXTS.has(ext)) {
-    const mimeMap: Record<string, 'image/jpeg' | 'image/png' | 'image/webp'> = {
-      png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp',
-    }
-    return { text: '', isImagePdf: false, isImageFile: true, imageMimeType: mimeMap[ext] ?? 'image/jpeg' }
-  }
-
-  return { text: `[File: ${filename}]`, isImagePdf: false, isImageFile: false }
 }
 
 const CLASSIFY_PROMPT = (courseList: string, filename: string, context: string | undefined, content: string) =>
@@ -96,10 +37,6 @@ Classify this document:
 
 Respond with exactly: {"is_context_hint":<true|false>,"course_id":"<uuid or null>","tier":<1-4>,"is_homework":<true|false>,"due_date":"<YYYY-MM-DD or null>"}`
 
-const EXTRACT_PROMPT = `Transcribe all readable content from this document or image.
-Include all text, equations, labels, headings, and problem statements exactly as they appear.
-Format as plain text. Return ONLY the transcribed content, nothing else.`
-
 function parseClassifyResponse(raw: string): { isContextHint: boolean; courseId: string | null; tier: number; isHomework: boolean; dueDate: string | null } {
   const cleaned = raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim()
   const match = cleaned.match(/\{[\s\S]*\}/)
@@ -115,23 +52,6 @@ function parseClassifyResponse(raw: string): { isContextHint: boolean; courseId:
     }
   } catch {
     return { isContextHint: false, courseId: null, tier: 4, isHomework: false, dueDate: null }
-  }
-}
-
-async function extractContentFromVision(
-  client: Anthropic,
-  visualBlock: DocumentBlockParam | ImageBlockParam,
-): Promise<string> {
-  try {
-    const textBlock: TextBlockParam = { type: 'text', text: EXTRACT_PROMPT }
-    const msg = await client.messages.create({
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: 4096,
-      messages: [{ role: 'user', content: [visualBlock, textBlock] }],
-    })
-    return msg.content[0].type === 'text' ? msg.content[0].text : ''
-  } catch {
-    return ''
   }
 }
 
@@ -202,22 +122,9 @@ export async function classifyMaterial(
   const client = new Anthropic({ apiKey })
 
   let rawResponse: string
-  let visualBlock: DocumentBlockParam | ImageBlockParam | null = null
-
-  if (isImagePdf) {
-    const base64Pdf = buffer.toString('base64')
-    visualBlock = {
-      type: 'document',
-      source: { type: 'base64', media_type: 'application/pdf', data: base64Pdf },
-    } satisfies DocumentBlockParam
-  } else if (isImageFile && imageMimeType) {
-    const { buffer: compressed, mimeType: finalMime } = await compressImageIfNeeded(buffer, imageMimeType)
-    const base64Img = compressed.toString('base64')
-    visualBlock = {
-      type: 'image',
-      source: { type: 'base64', media_type: finalMime, data: base64Img },
-    } satisfies ImageBlockParam
-  }
+  const visualBlock: DocumentBlockParam | ImageBlockParam | null = await buildVisualBlock(buffer, {
+    text: fullContent, isImagePdf, isImageFile, imageMimeType,
+  })
 
   if (needsVision && visualBlock) {
     try {

@@ -2,9 +2,10 @@ import { createMcpHandler, withMcpAuth } from 'mcp-handler'
 import { z } from 'zod'
 import { createServiceClient } from '@/lib/supabase/server'
 import { verifyMcpToken, type McpAuthInfo } from '@/lib/mcp/auth'
-import { retrieveChunks } from '@/lib/rag'
+import { retrieveChunksDetailed } from '@/lib/rag'
 import { readWikiFile } from '@/lib/wiki'
 import { newCardDefaults } from '@/lib/fsrs'
+import { dateKeyInTimeZone, isValidTimeZone } from '@/lib/time'
 
 export const runtime = 'nodejs'
 export const maxDuration = 60
@@ -22,6 +23,15 @@ function userIdFrom(extra: any): string | null {
 
 function asText(obj: unknown) {
   return { content: [{ type: 'text' as const, text: typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2) }] }
+}
+
+// "Today" in the STUDENT's timezone — the same dateKeyInTimeZone convention every
+// in-app due-date query uses. The MCP tools previously sliced an ISO string (UTC),
+// so due counts disagreed with the app by up to a day for non-UTC users (bug B5).
+async function userToday(service: ReturnType<typeof createServiceClient>, userId: string): Promise<string> {
+  const { data } = await service.from('users').select('timezone').eq('user_id', userId).maybeSingle()
+  const tz = isValidTimeZone(data?.timezone) ? data!.timezone as string : 'UTC'
+  return dateKeyInTimeZone(new Date(), tz)
 }
 
 const TUTOR_GUIDE = `You are tutoring this student using Cogni's tools, which give you their real course materials and mastery data. Tutor like Cogni's built-in tutor:
@@ -66,7 +76,7 @@ const handler = createMcpHandler(
         const userId = userIdFrom(extra)
         if (!userId) return asText({ error: 'unauthorized' })
         const service = createServiceClient()
-        const today = new Date().toISOString().slice(0, 10)
+        const today = await userToday(service, userId)
         const [topics, exams, assignments] = await Promise.all([
           service.from('topics').select('topic_id, name, professor_weight, topic_mastery(mastery_score)').eq('user_id', userId).eq('course_id', course_id),
           service.from('exams').select('date, grade_weight').eq('user_id', userId).eq('course_id', course_id).gte('date', today).order('date'),
@@ -119,9 +129,17 @@ const handler = createMcpHandler(
       async ({ course_id, query }, extra) => {
         const userId = userIdFrom(extra)
         if (!userId) return asText({ error: 'unauthorized' })
-        const chunks = await retrieveChunks(query, course_id, userId, 6).catch(() => [])
-        if (chunks.length === 0) return asText('No matching course material found (the student may not have uploaded materials, or no OpenAI key is set for search).')
-        return asText({ excerpts: chunks.map((c) => c.content) })
+        const { chunks, reason } = await retrieveChunksDetailed(query, course_id, userId, 6)
+          .catch(() => ({ chunks: [], reason: 'rag_error' as const }))
+        if (chunks.length > 0) return asText({ excerpts: chunks.map((c) => c.content) })
+        // Distinct empty states → distinct guidance (previously one generic string).
+        const empty: Record<string, string> = {
+          no_materials: 'This course has no stored materials yet — the student needs to upload notes/syllabus in Cogni before search can ground answers.',
+          no_openai_key: 'No results. The student has no OpenAI key connected, so only keyword search ran — suggest adding an OpenAI key in Cogni Settings for semantic search.',
+          rag_error: 'Search is temporarily unavailable (retrieval error) — answer from course overview data and say material search is down right now.',
+          nothing_relevant: 'No course material matched this query. The topic may not be covered in the uploaded materials — say so rather than inventing content.',
+        }
+        return asText(empty[reason] ?? empty.nothing_relevant)
       },
     )
 
@@ -136,7 +154,7 @@ const handler = createMcpHandler(
         const userId = userIdFrom(extra)
         if (!userId) return asText({ error: 'unauthorized' })
         const service = createServiceClient()
-        const today = new Date().toISOString().slice(0, 10)
+        const today = await userToday(service, userId)
         let q = service.from('flashcards').select('card_id, front, back, hint, course_id, topic_id').eq('user_id', userId).lte('fsrs_next_review_date', today).limit(50)
         if (course_id) q = q.eq('course_id', course_id)
         const { data } = await q

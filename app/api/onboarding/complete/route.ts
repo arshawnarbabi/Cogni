@@ -194,7 +194,9 @@ export async function POST(request: Request) {
     // Use allSettled so one failure doesn't prevent the response or other jobs
     const results = await Promise.allSettled(
       allowedJobs.map(job =>
-        runProfiler(user.id, job.materialId, job.courseId, job.courseName)
+        // embed: tier-1 syllabi are inserted as 'processed' (they skip the inbox
+        // pipeline that normally embeds), so the profiler must embed them for RAG.
+        runProfiler(user.id, job.materialId, job.courseId, job.courseName, { embed: true })
       )
     )
     results.forEach((r, i) => {

@@ -2,8 +2,16 @@ import Anthropic from '@anthropic-ai/sdk'
 import { createServiceClient } from '@/lib/supabase/server'
 import { getUserApiKey } from '@/lib/vault'
 import { readWikiFile, writeWikiFile, appendToLog } from '@/lib/wiki'
-import { retrieveChunks } from '@/lib/rag'
+import { retrieveChunks, processEmbeddings } from '@/lib/rag'
 import { requireOwnedCourse } from '@/lib/authz'
+import { extractText, buildVisualBlock, extractContentFromVision } from '@/lib/extract-text'
+
+// Character budgets for syllabus prompts. Previously 12k/10k chars, which silently
+// dropped the tail of long syllabi — and syllabi are chronological, so the tail is
+// exactly the late-semester exams/assignments the scheduler most needs. 48k chars
+// ≈ 12k tokens: comfortably within Sonnet's window while bounding worst-case cost.
+const SYLLABUS_EXTRACT_BUDGET = 48000
+const SYLLABUS_PROFILE_BUDGET = 32000
 
 type ExtractedTopic = {
   name: string
@@ -34,7 +42,10 @@ async function extractTopicsAndExams(
 
   const message = await client.messages.create({
     model: 'claude-sonnet-4-6',
-    max_tokens: 2048,
+    // 4096 (was 2048): a full semester of assignments + exams can exceed 2048
+    // output tokens, truncating the JSON mid-array → parse failure → silently
+    // empty extraction.
+    max_tokens: 4096,
     messages: [
       {
         role: 'user',
@@ -66,7 +77,7 @@ For assignments (problem sets, homework, projects, papers with a DUE DATE):
 - topics: list of topic names (from your extracted topics list) the assignment covers (best-effort; [] if unclear)
 
 Syllabus:
-${syllabusText.slice(0, 12000)}
+${syllabusText.slice(0, SYLLABUS_EXTRACT_BUDGET)}
 
 Respond with exactly:
 {"topics":[{"name":"...","syllabus_order":1,"professor_weight":0.7},...],
@@ -137,7 +148,7 @@ Professor: ${professorName}
 Course: ${courseName}
 ${existingWiki ? `\nExisting profile (update and expand, do not lose data):\n${existingWiki}\n` : ''}
 Syllabus:
-${syllabusText.slice(0, 10000)}
+${syllabusText.slice(0, SYLLABUS_PROFILE_BUDGET)}
 
 Extract everything that reveals this professor's patterns, priorities, and style. Write a concise markdown wiki file covering:
 
@@ -155,22 +166,49 @@ Be specific and factual — only write what the syllabus actually says. Do not i
   return message.content[0].type === 'text' ? message.content[0].text.trim() : ''
 }
 
+// Tutor-recorded learning insights are appended to learning_profile.md as
+// `- [YYYY-MM-DD] insight` bullets (write_wiki_pattern). The profiler rebuilds the
+// file from DB state, so it MUST carry those bullets forward — previously every
+// profiler re-run silently wiped all tutor-recorded memory (verified bug B3).
+const TUTOR_INSIGHT_RE = /^- \[\d{4}-\d{2}-\d{2}\] /
+
+function extractTutorInsights(existingProfile: string | null): string[] {
+  if (!existingProfile) return []
+  const seen = new Set<string>()
+  const insights: string[] = []
+  for (const raw of existingProfile.split('\n')) {
+    const line = raw.trim()
+    if (TUTOR_INSIGHT_RE.test(line) && !seen.has(line)) {
+      seen.add(line)
+      insights.push(line)
+    }
+  }
+  return insights
+}
+
 async function buildLearningProfile(userId: string): Promise<string> {
   const service = createServiceClient()
 
-  const { data: courses } = await service
-    .from('courses')
-    .select(`
-      course_id,
-      name,
-      professors ( name ),
-      topics ( topic_id )
-    `)
-    .eq('user_id', userId)
-    .eq('active_status', 'active')
+  const [{ data: courses }, existingProfile] = await Promise.all([
+    service
+      .from('courses')
+      .select(`
+        course_id,
+        name,
+        professors ( name ),
+        topics ( topic_id )
+      `)
+      .eq('user_id', userId)
+      .eq('active_status', 'active'),
+    readWikiFile(userId, 'learning_profile.md').catch(() => null),
+  ])
+
+  const tutorInsights = extractTutorInsights(existingProfile)
 
   if (!courses || courses.length === 0) {
-    return `# Learning Profile\n\n*No courses enrolled yet.*\n`
+    const empty = ['# Learning Profile', '', '*No courses enrolled yet.*', '']
+    if (tutorInsights.length > 0) empty.push('## Observed Patterns', '', ...tutorInsights, '')
+    return empty.join('\n')
   }
 
   const lines = ['# Learning Profile', '', '## Enrolled Courses', '']
@@ -187,6 +225,10 @@ async function buildLearningProfile(userId: string): Promise<string> {
 
   lines.push('## Strengths', '*Will be updated as you study.*', '')
   lines.push('## Study Preferences', '*Derived from session history over time.*', '')
+
+  if (tutorInsights.length > 0) {
+    lines.push('## Observed Patterns', '', ...tutorInsights, '')
+  }
 
   return lines.join('\n')
 }
@@ -227,6 +269,14 @@ export async function runProfiler(
   materialId: string,
   courseId: string,
   courseName: string,
+  opts?: {
+    // Embed the syllabus text for RAG after extraction. Set by the syllabus-insert
+    // paths (onboarding/complete, courses/create, profiler/rerun) which previously
+    // never embedded tier-1 materials at all (verified bug B1) — the richest course
+    // document was invisible to retrieval. The inbox path embeds separately and
+    // must NOT set this (it would double-embed).
+    embed?: boolean
+  },
 ): Promise<void> {
   const tag = `[profiler ${courseName}]`
   const service = createServiceClient()
@@ -265,21 +315,22 @@ export async function runProfiler(
   }
 
   const buffer = Buffer.from(await fileData.arrayBuffer())
-  let syllabusText = ''
+  const client = new Anthropic({ apiKey })
 
-  if (material.file_type === 'pdf') {
-    try {
-      // pdf-parse must be lazy-loaded via require — its top-level code crashes at import time
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const pdfParse = require('pdf-parse')
-      const parsed = await pdfParse(buffer)
-      syllabusText = parsed.text
-    } catch (e) {
-      console.error(`${tag} pdf-parse failed, falling back to utf-8`, e)
-      syllabusText = buffer.toString('utf-8')
+  // Shared extraction (same module the inbox classifier uses) including the vision
+  // fallback for scanned/image-only PDFs — previously the profiler had no OCR path,
+  // so a scanned syllabus silently produced zero topics (verified bug B8).
+  const extracted = await extractText(buffer, material.file_type ?? '', material.filename ?? '')
+  let syllabusText = extracted.text
+
+  if (extracted.isImagePdf || extracted.isImageFile) {
+    const visualBlock = await buildVisualBlock(buffer, extracted)
+    if (visualBlock) {
+      const visionText = await extractContentFromVision(client, visualBlock)
+      if (visionText.trim().length >= 50) {
+        syllabusText = visionText
+      }
     }
-  } else {
-    syllabusText = buffer.toString('utf-8')
   }
 
   if (syllabusText.trim().length < 50) {
@@ -287,7 +338,13 @@ export async function runProfiler(
     return
   }
 
-  const client = new Anthropic({ apiKey })
+  // Embed the syllabus for RAG (B1). Non-fatal: profiling proceeds even if the
+  // user has no OpenAI key (processEmbeddings stores keyword-searchable chunks).
+  if (opts?.embed) {
+    await processEmbeddings(userId, materialId, syllabusText).catch(e =>
+      console.error(`${tag} processEmbeddings failed (non-fatal)`, e)
+    )
+  }
 
   // Load already-tracked topics FIRST so the extractor can reuse their canonical
   // names instead of inventing near-duplicates (the exact-name dedup below missed
@@ -339,16 +396,22 @@ export async function runProfiler(
   let insertedTopics: { topic_id: string; name: string }[] = []
 
   if (newTopics.length > 0) {
+    // Upsert with ignoreDuplicates (ON CONFLICT DO NOTHING on the
+    // topics_user_course_name_uniq index): two concurrent profiler runs read the
+    // same existing-topics snapshot, so both try to insert the same "new" topics —
+    // previously a duplicate-row race (verified bug B12). The loser's rows are
+    // skipped; its mastery seeding is covered by the winner.
     const { data, error: topicInsertError } = await service
       .from('topics')
-      .insert(
+      .upsert(
         newTopics.map(t => ({
           course_id: courseId,
           user_id: userId,
           name: t.name,
           syllabus_order: t.syllabus_order,
           professor_weight: t.professor_weight,
-        }))
+        })),
+        { onConflict: 'user_id,course_id,name', ignoreDuplicates: true }
       )
       .select('topic_id, name')
 
@@ -360,13 +423,14 @@ export async function runProfiler(
     insertedTopics = (data ?? []) as { topic_id: string; name: string }[]
 
     if (insertedTopics.length > 0) {
-      await service.from('topic_mastery').insert(
+      await service.from('topic_mastery').upsert(
         insertedTopics.map((t: { topic_id: string }) => ({
           user_id: userId,
           topic_id: t.topic_id,
           mastery_score: 0,
           confidence: 0,
-        }))
+        })),
+        { onConflict: 'user_id,topic_id', ignoreDuplicates: true }
       )
     }
   }
@@ -447,7 +511,12 @@ export async function runProfiler(
         }))
 
       if (assignmentRowsToInsert.length > 0) {
-        const { error: assignmentInsertError } = await service.from('assignments').insert(assignmentRowsToInsert)
+        // ignoreDuplicates on assignments_user_course_name_due_uniq: concurrent
+        // profiler runs (or a re-run racing the first) can't accrete duplicate
+        // assignment rows (B12).
+        const { error: assignmentInsertError } = await service
+          .from('assignments')
+          .upsert(assignmentRowsToInsert, { onConflict: 'user_id,course_id,name,due_date', ignoreDuplicates: true })
         if (assignmentInsertError) console.error(`${tag} assignment batch insert failed`, assignmentInsertError)
       }
     }
