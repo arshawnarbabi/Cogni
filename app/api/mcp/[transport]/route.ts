@@ -2,9 +2,11 @@ import { createMcpHandler, withMcpAuth } from 'mcp-handler'
 import { z } from 'zod'
 import { createServiceClient } from '@/lib/supabase/server'
 import { verifyMcpToken, type McpAuthInfo } from '@/lib/mcp/auth'
+import { mcpGuard, auditMcpCall } from '@/lib/mcp/guards'
 import { retrieveChunksDetailed } from '@/lib/rag'
 import { readWikiFile } from '@/lib/wiki'
 import { newCardDefaults } from '@/lib/fsrs'
+import { assignNewCardDueDates } from '@/lib/agents/flashcard'
 import { dateKeyInTimeZone, isValidTimeZone } from '@/lib/time'
 
 export const runtime = 'nodejs'
@@ -34,6 +36,38 @@ async function userToday(service: ReturnType<typeof createServiceClient>, userId
   return dateKeyInTimeZone(new Date(), tz)
 }
 
+// Every tool runs through this wrapper (F4): auth extraction, the shared guard
+// (suspended / kill-switch / per-user daily quota), an audit row, and a try/catch
+// so one tool failure returns a structured error instead of crashing the request.
+function guarded<A>(
+  tool: string,
+  kind: 'read' | 'write',
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  handler: (args: A, userId: string) => Promise<any>,
+) {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return async (args: A, extra: any) => {
+    const userId = userIdFrom(extra)
+    if (!userId) return asText({ error: 'unauthorized' })
+
+    const blocked = await mcpGuard(userId, kind)
+    if (blocked) {
+      auditMcpCall(userId, tool, false, blocked)
+      return asText({ error: blocked })
+    }
+
+    try {
+      const result = await handler(args, userId)
+      auditMcpCall(userId, tool, true)
+      return result
+    } catch (e) {
+      console.error(`[mcp] ${tool} failed`, e)
+      auditMcpCall(userId, tool, false, e instanceof Error ? e.message : 'error')
+      return asText({ error: 'internal_error', detail: 'The tool failed unexpectedly — try again.' })
+    }
+  }
+}
+
 const TUTOR_GUIDE = `You are tutoring this student using Cogni's tools, which give you their real course materials and mastery data. Tutor like Cogni's built-in tutor:
 
 - Ground everything in THEIR materials: call \`search_materials\` for the relevant topic before explaining, and treat retrieved excerpts as authoritative over your general knowledge (a professor's non-standard rule wins).
@@ -54,15 +88,13 @@ const handler = createMcpHandler(
         description: "List the student's active courses (course_id + name). Call this first — the other tools need a course_id.",
         inputSchema: {},
       },
-      async (_args, extra) => {
-        const userId = userIdFrom(extra)
-        if (!userId) return asText({ error: 'unauthorized' })
+      guarded('list_courses', 'read', async (_args, userId) => {
         const service = createServiceClient()
         const { data } = await service
           .from('courses').select('course_id, name')
           .eq('user_id', userId).eq('active_status', 'active').order('created_at')
         return asText((data ?? []).map((c: { course_id: string; name: string }) => ({ course_id: c.course_id, name: c.name })))
-      },
+      }),
     )
 
     server.registerTool(
@@ -72,9 +104,7 @@ const handler = createMcpHandler(
         description: 'Topics (with mastery %), upcoming exams, and pending assignments for a course. Use it to focus tutoring on what the student actually needs.',
         inputSchema: { course_id: z.string().describe('A course_id from list_courses') },
       },
-      async ({ course_id }, extra) => {
-        const userId = userIdFrom(extra)
-        if (!userId) return asText({ error: 'unauthorized' })
+      guarded('get_course_overview', 'read', async ({ course_id }: { course_id: string }, userId) => {
         const service = createServiceClient()
         const today = await userToday(service, userId)
         const [topics, exams, assignments] = await Promise.all([
@@ -88,7 +118,7 @@ const handler = createMcpHandler(
           return { topic_id: t.topic_id, name: t.name, weight: Number(t.professor_weight ?? 0.5), mastery_pct: Math.round(Number(ms ?? 0) * 100) }
         })
         return asText({ topics: topicsOut, upcoming_exams: exams.data ?? [], pending_assignments: assignments.data ?? [] })
-      },
+      }),
     )
 
     server.registerTool(
@@ -98,9 +128,7 @@ const handler = createMcpHandler(
         description: 'The student\'s highest-leverage weak topics (high professor weight × low mastery). Steer practice here.',
         inputSchema: { course_id: z.string().optional().describe('Optional: limit to one course') },
       },
-      async ({ course_id }, extra) => {
-        const userId = userIdFrom(extra)
-        if (!userId) return asText({ error: 'unauthorized' })
+      guarded('get_weak_topics', 'read', async ({ course_id }: { course_id?: string }, userId) => {
         const service = createServiceClient()
         let q = service.from('topics').select('topic_id, name, course_id, professor_weight, topic_mastery(mastery_score)').eq('user_id', userId)
         if (course_id) q = q.eq('course_id', course_id)
@@ -113,7 +141,7 @@ const handler = createMcpHandler(
         }).sort((a: { priority: number }, b: { priority: number }) => b.priority - a.priority).slice(0, 8)
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         return asText(ranked.map((t: any) => ({ topic_id: t.topic_id, name: t.name, course_id: t.course_id, mastery_pct: t.mastery_pct })))
-      },
+      }),
     )
 
     server.registerTool(
@@ -126,9 +154,7 @@ const handler = createMcpHandler(
           query: z.string().describe('What to look up, in natural language'),
         },
       },
-      async ({ course_id, query }, extra) => {
-        const userId = userIdFrom(extra)
-        if (!userId) return asText({ error: 'unauthorized' })
+      guarded('search_materials', 'read', async ({ course_id, query }: { course_id: string; query: string }, userId) => {
         const { chunks, reason } = await retrieveChunksDetailed(query, course_id, userId, 6)
           .catch(() => ({ chunks: [], reason: 'rag_error' as const }))
         if (chunks.length > 0) return asText({ excerpts: chunks.map((c) => c.content) })
@@ -140,7 +166,7 @@ const handler = createMcpHandler(
           nothing_relevant: 'No course material matched this query. The topic may not be covered in the uploaded materials — say so rather than inventing content.',
         }
         return asText(empty[reason] ?? empty.nothing_relevant)
-      },
+      }),
     )
 
     server.registerTool(
@@ -150,16 +176,14 @@ const handler = createMcpHandler(
         description: 'Flashcards the student has due for review today (optionally for one course). Useful for running a quick review.',
         inputSchema: { course_id: z.string().optional() },
       },
-      async ({ course_id }, extra) => {
-        const userId = userIdFrom(extra)
-        if (!userId) return asText({ error: 'unauthorized' })
+      guarded('get_due_cards', 'read', async ({ course_id }: { course_id?: string }, userId) => {
         const service = createServiceClient()
         const today = await userToday(service, userId)
         let q = service.from('flashcards').select('card_id, front, back, hint, course_id, topic_id').eq('user_id', userId).lte('fsrs_next_review_date', today).limit(50)
         if (course_id) q = q.eq('course_id', course_id)
         const { data } = await q
         return asText({ due_count: (data ?? []).length, cards: data ?? [] })
-      },
+      }),
     )
 
     // ── WRITE ───────────────────────────────────────────────────────────────
@@ -178,20 +202,35 @@ const handler = createMcpHandler(
           })).min(1).max(20).describe('1–20 cards'),
         },
       },
-      async ({ course_id, topic_id, cards }, extra) => {
-        const userId = userIdFrom(extra)
-        if (!userId) return asText({ error: 'unauthorized' })
+      guarded('create_flashcards', 'write', async (
+        { course_id, topic_id, cards }: { course_id: string; topic_id: string; cards: { front: string; back: string; hint?: string }[] },
+        userId,
+      ) => {
         const service = createServiceClient()
         // Verify the topic belongs to this user + course (don't trust client IDs).
         const { data: topic } = await service.from('topics').select('topic_id').eq('topic_id', topic_id).eq('user_id', userId).eq('course_id', course_id).maybeSingle()
         if (!topic) return asText({ error: 'topic_not_found', detail: 'topic_id must belong to the given course_id (call get_course_overview).' })
+
+        // Pace new cards through the same daily-introduction budget the in-app
+        // generator uses — previously MCP cards all landed due-today (B11),
+        // dumping a wall of cards on the student.
+        const { data: tzRow } = await service.from('users').select('timezone').eq('user_id', userId).maybeSingle()
+        const tz = isValidTimeZone(tzRow?.timezone) ? tzRow!.timezone as string : 'UTC'
+        const dueDates = await assignNewCardDueDates(service, userId, cards.length, tz)
+
         const defaults = newCardDefaults()
         const { error } = await service.from('flashcards').insert(
-          cards.map((c) => ({ user_id: userId, course_id, topic_id, front: c.front, back: c.back, hint: c.hint ?? null, ...defaults })),
+          cards.map((c, i) => ({
+            user_id: userId, course_id, topic_id,
+            front: c.front, back: c.back, hint: c.hint ?? null,
+            ...defaults,
+            fsrs_next_review_date: dueDates[i],
+          })),
         )
         if (error) return asText({ error: 'insert_failed' })
-        return asText({ created: cards.length, message: `${cards.length} flashcards saved to Cogni and added to the review queue.` })
-      },
+        const dueToday = dueDates.filter((d) => d === dueDates[0]).length
+        return asText({ created: cards.length, message: `${cards.length} flashcards saved to Cogni (${dueToday} enter the review queue today; the rest are paced over the coming days).` })
+      }),
     )
 
     server.registerTool(
@@ -201,12 +240,10 @@ const handler = createMcpHandler(
         description: "The durable notes Cogni keeps about how this student learns (strengths, recurring misconceptions). Use it to calibrate your explanations.",
         inputSchema: {},
       },
-      async (_args, extra) => {
-        const userId = userIdFrom(extra)
-        if (!userId) return asText({ error: 'unauthorized' })
+      guarded('get_learning_profile', 'read', async (_args, userId) => {
         const profile = await readWikiFile(userId, 'learning_profile.md').catch(() => null)
         return asText(profile || 'No learning profile yet — it builds up as the student studies.')
-      },
+      }),
     )
 
     // ── PROMPT (M4): the tutoring persona ─────────────────────────────────────

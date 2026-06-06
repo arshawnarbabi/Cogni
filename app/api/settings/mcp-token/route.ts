@@ -17,7 +17,7 @@ export async function GET() {
   const service = createServiceClient()
   const { data } = await service
     .from('mcp_tokens')
-    .select('created_at, last_used_at')
+    .select('created_at, last_used_at, expires_at')
     .eq('user_id', user.id)
     .order('created_at', { ascending: false })
     .limit(1)
@@ -27,6 +27,7 @@ export async function GET() {
     connected: !!data,
     created_at: data?.created_at ?? null,
     last_used_at: data?.last_used_at ?? null,
+    expires_at: data?.expires_at ?? null,
   })
 }
 
@@ -37,13 +38,16 @@ export async function POST() {
 
   const service = createServiceClient()
   const { token, hash } = generateMcpToken()
+  // Tokens expire after 180 days (previously they lived forever — a leaked token
+  // was valid indefinitely). Regenerating in Settings issues a fresh 180-day token.
+  const expiresAt = new Date(Date.now() + 180 * 24 * 60 * 60 * 1000).toISOString()
   // One active token per user (user_id is the PK). Upsert ATOMICALLY replaces any
   // existing token in a single statement, so concurrent regenerates can't leave two
   // valid tokens — and the old token is revoked the instant the new one is written.
   const { error } = await service
     .from('mcp_tokens')
     .upsert(
-      { user_id: user.id, token_hash: hash, label: 'claude', created_at: new Date().toISOString(), last_used_at: null },
+      { user_id: user.id, token_hash: hash, label: 'claude', created_at: new Date().toISOString(), last_used_at: null, expires_at: expiresAt },
       { onConflict: 'user_id' },
     )
   if (error) {

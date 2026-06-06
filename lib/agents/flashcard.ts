@@ -15,8 +15,10 @@ const NEW_CARDS_PER_DAY = 15
 
 // Assigns each of `count` new cards a due date, filling upcoming days up to the
 // per-day budget and accounting for new cards already scheduled (across all the
-// user's topics, so the cap is global, not per-topic).
-async function assignNewCardDueDates(
+// user's topics, so the cap is global, not per-topic). Exported: the MCP and
+// tutor create_flashcards paths must pace too — they previously dumped every
+// new card as due-today, bypassing this budget (B11).
+export async function assignNewCardDueDates(
   service: ReturnType<typeof createServiceClient>,
   userId: string,
   count: number,

@@ -108,6 +108,20 @@ grant execute on function public.review_card_atomic(
   uuid, uuid, numeric, numeric, integer, integer, text, timestamptz, date, numeric, numeric
 ) to service_role;
 
+-- ── F4: MCP guard layer — token expiry + tool-call audit ─────────────────────
+alter table public.mcp_tokens add column if not exists expires_at timestamptz;
+
+create table if not exists public.mcp_tool_calls (
+  call_id    uuid primary key default gen_random_uuid(),
+  user_id    uuid not null references auth.users(id) on delete cascade,
+  tool       text not null,
+  ok         boolean not null,
+  detail     text,
+  created_at timestamptz not null default now()
+);
+alter table public.mcp_tool_calls enable row level security;
+create index if not exists idx_mcp_tool_calls_user_created on public.mcp_tool_calls(user_id, created_at);
+
 -- PostgREST must see the new unique indexes + function signature before the
 -- app's upsert-on-conflict / RPC calls work.
 notify pgrst, 'reload schema';

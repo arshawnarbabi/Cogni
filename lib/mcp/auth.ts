@@ -38,11 +38,18 @@ export async function verifyMcpToken(
   const service = createServiceClient()
   const { data } = await service
     .from('mcp_tokens')
-    .select('user_id')
+    .select('user_id, expires_at')
     .eq('token_hash', hash)
     .maybeSingle()
 
   if (!data?.user_id) return undefined
+
+  // Tokens expire (previously they lived forever — a leaked token was valid
+  // indefinitely). NULL expires_at = legacy token, still honored; new tokens
+  // always get an expiry from the settings route.
+  if (data.expires_at && new Date(data.expires_at as string).getTime() < Date.now()) {
+    return undefined
+  }
 
   // Best-effort last-used stamp; never block auth on it.
   void service

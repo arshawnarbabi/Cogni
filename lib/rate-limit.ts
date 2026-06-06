@@ -13,6 +13,8 @@ export const DAILY_LIMITS = {
   inbox_classify: 40, // per-upload material classification
   web_enrichment: 5,  // web-search syllabus enrichment — most expensive path (Sonnet + web_search, up to 4 iterations)
   grade: 40,          // short-answer grading fan-out (Haiku per question) — serves practice_quiz + simulated_exam
+  mcp_read: 500,      // MCP read tools (cheap DB queries; generous — a long tutoring session reads a lot)
+  mcp_write: 60,      // MCP write tools (create_flashcards etc.) — bounds an unattended/abused token
 } as const
 
 export type AiAction = keyof typeof DAILY_LIMITS
