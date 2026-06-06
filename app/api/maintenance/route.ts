@@ -20,6 +20,23 @@ export async function GET(request: Request) {
       await pingHeartbeat(process.env.CRON_HEARTBEAT_MAINTENANCE_URL, false)
       return NextResponse.json({ ok: false }, { status: 500 })
     }
+
+    // Growth hygiene for the big-update audit/telemetry tables (free-tier row
+    // budget): usage_events 90d (the panel shows 30d), mcp_tool_calls 30d,
+    // done/failed jobs 14d. review_logs is intentionally KEPT — it's the
+    // substrate for per-user FSRS optimization.
+    const ninetyDaysAgo = new Date(Date.now() - 90 * 86_400_000).toISOString()
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 86_400_000).toISOString()
+    const fourteenDaysAgo = new Date(Date.now() - 14 * 86_400_000).toISOString()
+    const purges = await Promise.all([
+      service.from('usage_events').delete().lt('created_at', ninetyDaysAgo),
+      service.from('mcp_tool_calls').delete().lt('created_at', thirtyDaysAgo),
+      service.from('jobs').delete().in('status', ['done', 'failed']).lt('updated_at', fourteenDaysAgo),
+    ])
+    purges.forEach((r, i) => {
+      if (r.error) console.error(`[maintenance] purge ${['usage_events', 'mcp_tool_calls', 'jobs'][i]} failed`, r.error)
+    })
+
     await pingHeartbeat(process.env.CRON_HEARTBEAT_MAINTENANCE_URL, true)
     return NextResponse.json({ ok: true, purgedDailyUsageRows: data ?? 0 })
   } catch (e) {
