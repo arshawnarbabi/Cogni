@@ -46,6 +46,14 @@ const OBSERVED_BY_RATING: Record<1 | 2 | 3 | 4, number> = {
   4: 1.0,  // Easy
 }
 
+/** Observed level for one flashcard rating. The 1/sqrt(deck) learning-rate
+ *  scaling happens INSIDE review_card_atomic (the deck count runs under the
+ *  row lock the RPC already holds — no extra round trip per rating tap);
+ *  the policy values still live here. */
+export function flashcardObserved(rating: 1 | 2 | 3 | 4): number {
+  return OBSERVED_BY_RATING[rating]
+}
+
 const CONFIDENCE_STEP = 0.05
 
 export type MasteryUpdate = {
@@ -81,6 +89,9 @@ function round2(n: number): number {
 // Evidence parameters for one flashcard rating. The per-flip learning rate is
 // scaled by 1/sqrt(cards in topic): a topic's mastery should reflect the deck,
 // not drift unboundedly with review volume.
+// NOTE: in production this scaling runs INSIDE review_card_atomic (the deck
+// count happens under the RPC's row lock); this function is the unit-tested
+// reference implementation of the same policy — keep them in sync.
 export function flashcardEvidence(
   rating: 1 | 2 | 3 | 4,
   cardsInTopic: number,

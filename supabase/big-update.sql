@@ -43,6 +43,9 @@ create unique index if not exists assignments_user_course_name_due_uniq
 -- scale — plus a client_review_id idempotency gate and a review_logs ledger
 -- (one row per rating; also the substrate for per-user FSRS optimization).
 drop function if exists public.review_card_atomic(
+  uuid, uuid, numeric, numeric, integer, integer, integer, timestamptz, date, numeric
+);
+drop function if exists public.review_card_atomic(
   uuid, uuid, numeric, numeric, integer, integer, text, timestamptz, date, numeric
 );
 drop function if exists public.review_card_atomic(
@@ -92,6 +95,8 @@ set search_path = public
 as $$
 declare
   v_card record;
+  v_deck integer;
+  v_lr numeric;
 begin
   select card_id, topic_id, fsrs_stability, fsrs_difficulty, fsrs_state
   into v_card
@@ -130,12 +135,18 @@ begin
     and user_id = p_user_id;
 
   if v_card.topic_id is not null then
+    -- Scale by 1/sqrt(deck size), counted under the lock (no extra round trip).
+    select count(*) into v_deck
+    from public.flashcards
+    where user_id = p_user_id and topic_id = v_card.topic_id;
+    v_lr := greatest(0, least(1, p_learning_rate)) / sqrt(greatest(1, v_deck));
+
     insert into public.topic_mastery (user_id, topic_id, mastery_score, confidence, last_updated)
     values (p_user_id, v_card.topic_id, greatest(0, least(1, p_observed)), 0.05, now())
     on conflict (user_id, topic_id) do update
       set mastery_score = greatest(0, least(1,
             coalesce(public.topic_mastery.mastery_score, 0)
-            + greatest(0, least(1, p_learning_rate))
+            + v_lr
               * (greatest(0, least(1, p_observed)) - coalesce(public.topic_mastery.mastery_score, 0)))),
           confidence = least(1, coalesce(public.topic_mastery.confidence, 0) + 0.05),
           last_updated = now();
@@ -149,12 +160,20 @@ begin
 end;
 $$;
 
--- service_role ONLY (was also granted to authenticated): SECURITY DEFINER +
--- p_user_id parameter meant any logged-in user could replay it against another
--- user's card. Only the server route (service client) calls it.
+-- service_role ONLY: SECURITY DEFINER + p_user_id parameter means anyone who
+-- can execute it can replay it against another user's card. A freshly-created
+-- function gets Postgres's default EXECUTE-to-PUBLIC grant, so the revoke is
+-- REQUIRED — without it any anon-key holder could rewrite other users' FSRS
+-- and mastery state.
+revoke all on function public.review_card_atomic(
+  uuid, uuid, numeric, numeric, integer, integer, text, timestamptz, date, numeric, numeric, smallint, uuid
+) from anon, authenticated, public;
 grant execute on function public.review_card_atomic(
   uuid, uuid, numeric, numeric, integer, integer, text, timestamptz, date, numeric, numeric, smallint, uuid
 ) to service_role;
+
+-- review_card_atomic counts the topic's deck on every rating — make it an index scan.
+create index if not exists idx_flashcards_user_topic on public.flashcards(user_id, topic_id);
 
 -- ── R5: BYOK key health ───────────────────────────────────────────────────────
 -- 'invalid' | 'no_credits' | NULL (healthy/unknown). Written by the withRetry
@@ -166,6 +185,20 @@ alter table public.users add column if not exists openai_key_status text
   check (openai_key_status in ('invalid', 'no_credits') or openai_key_status is null);
 
 -- ── F4: MCP guard layer — token expiry + tool-call audit ─────────────────────
+-- mcp_tokens may not exist on a prod DB that never ran mcp.sql (the optional
+-- BYO-Claude connector). Create it idempotently first — ADD COLUMN IF NOT
+-- EXISTS guards the column, not the table, so the bare ALTER would abort.
+create table if not exists public.mcp_tokens (
+  user_id    uuid primary key references auth.users(id) on delete cascade,
+  token_hash text not null unique,
+  label      text,
+  created_at timestamptz not null default now(),
+  last_used_at timestamptz,
+  expires_at timestamptz
+);
+alter table public.mcp_tokens enable row level security;
+alter table public.users add column if not exists prefer_own_claude boolean not null default false;
+
 alter table public.mcp_tokens add column if not exists expires_at timestamptz;
 
 create table if not exists public.mcp_tool_calls (
@@ -249,6 +282,62 @@ $$;
 
 revoke all on function public.claim_jobs(int) from anon, authenticated, public;
 grant execute on function public.claim_jobs(int) to service_role;
+
+-- ======================================================================
+-- Section 13: Persistent tutor memory (M1 + M2)
+-- ======================================================================
+-- Episodic memory: one distilled row per finished tutoring session (what was
+-- covered, what confused the student, what they got right, stated preferences).
+-- Written by lib/agents/memory.ts (one Haiku call per session close).
+create table if not exists public.session_summaries (
+  summary_id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references public.users(user_id) on delete cascade,
+  session_id uuid not null unique references public.session_log(session_id) on delete cascade,
+  course_id uuid not null references public.courses(course_id) on delete cascade,
+  summary text not null,
+  confusions text[],
+  understood text[],
+  preferences text[],
+  topics_discussed uuid[],
+  message_count integer,
+  created_at timestamptz not null default now()
+);
+alter table public.session_summaries enable row level security;
+drop policy if exists "session_summaries: own rows only" on public.session_summaries;
+create policy "session_summaries: own rows only" on public.session_summaries
+  for select using (auth.uid() = user_id);
+create index if not exists idx_session_summaries_user_course on public.session_summaries(user_id, course_id, created_at);
+
+-- Rolling per-course digest: ONE capped narrative per (user, course) — what's
+-- been covered across all sessions, persistent confusions, stable preferences.
+-- O(1) prompt tokens per tutor request no matter how many sessions exist.
+create table if not exists public.course_memory (
+  user_id uuid not null references public.users(user_id) on delete cascade,
+  course_id uuid not null references public.courses(course_id) on delete cascade,
+  digest text not null,
+  updated_at timestamptz not null default now(),
+  primary key (user_id, course_id)
+);
+alter table public.course_memory enable row level security;
+drop policy if exists "course_memory: own rows only" on public.course_memory;
+create policy "course_memory: own rows only" on public.course_memory
+  for select using (auth.uid() = user_id);
+
+-- In-session history compaction (M6): once a session transcript outgrows the
+-- verbatim window, the older prefix is summarized once and cached here instead
+-- of being re-sent (and re-billed) on every subsequent turn.
+alter table public.session_log add column if not exists history_summary text;
+alter table public.session_log add column if not exists history_summary_upto integer;
+
+-- MCP-logged study sessions (X3) get their own mode value.
+alter table public.session_log drop constraint if exists session_log_mode_check;
+alter table public.session_log add constraint session_log_mode_check
+  check (mode in ('answer', 'teach', 'focus', 'essay', 'mcp'));
+
+-- The memory distiller runs as a durable job.
+alter table public.jobs drop constraint if exists jobs_kind_check;
+alter table public.jobs add constraint jobs_kind_check
+  check (kind in ('profile', 'embed', 'flashcards', 'distill'));
 
 -- PostgREST must see the new unique indexes + function signature before the
 -- app's upsert-on-conflict / RPC calls work.

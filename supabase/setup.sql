@@ -362,6 +362,8 @@ create policy "material_embeddings: own rows only" on public.material_embeddings
 create index if not exists idx_topics_course_id on public.topics(course_id);
 create index if not exists idx_topic_mastery_user_topic on public.topic_mastery(user_id, topic_id);
 create index if not exists idx_flashcards_user_course on public.flashcards(user_id, course_id);
+-- review_card_atomic counts the topic's deck on every rating — make it an index scan.
+create index if not exists idx_flashcards_user_topic on public.flashcards(user_id, topic_id);
 create index if not exists idx_flashcards_due on public.flashcards(fsrs_next_review_date);
 create index if not exists idx_exams_course_date on public.exams(course_id, date);
 create index if not exists idx_assignments_user_due on public.assignments(user_id, due_date);
@@ -867,6 +869,8 @@ set search_path = public
 as $$
 declare
   v_card record;
+  v_deck integer;
+  v_lr numeric;
 begin
   -- Lock the card first: serializes concurrent duplicates and captures the
   -- pre-review FSRS state for the log.
@@ -910,6 +914,14 @@ begin
     and user_id = p_user_id;
 
   if v_card.topic_id is not null then
+    -- Scale the learning rate by 1/sqrt(cards in this topic): one flip of one
+    -- card in a 50-card deck says far less about the topic than in a 3-card
+    -- deck. Counted here, under the lock — no extra round trip from the route.
+    select count(*) into v_deck
+    from public.flashcards
+    where user_id = p_user_id and topic_id = v_card.topic_id;
+    v_lr := greatest(0, least(1, p_learning_rate)) / sqrt(greatest(1, v_deck));
+
     -- EWMA toward the observed level: next = old + lr * (observed - old).
     -- Cold start (no row): adopt observed directly — the prior is uninformative.
     -- confidence grows +0.05 per evidence event (was a dead column, always 0).
@@ -918,7 +930,7 @@ begin
     on conflict (user_id, topic_id) do update
       set mastery_score = greatest(0, least(1,
             coalesce(public.topic_mastery.mastery_score, 0)
-            + greatest(0, least(1, p_learning_rate))
+            + v_lr
               * (greatest(0, least(1, p_observed)) - coalesce(public.topic_mastery.mastery_score, 0)))),
           confidence = least(1, coalesce(public.topic_mastery.confidence, 0) + 0.05),
           last_updated = now();
@@ -1108,7 +1120,7 @@ revoke execute on function public.store_user_api_key(uuid, text)                
 revoke execute on function public.store_user_secret(uuid, text, text)            from anon, authenticated, public;
 revoke execute on function public.delete_user_api_key(uuid)                      from anon, authenticated, public;
 revoke execute on function public.delete_user_secret(uuid, text)                 from anon, authenticated, public;
-revoke execute on function public.review_card_atomic(uuid, uuid, numeric, numeric, integer, integer, text, timestamptz, date, numeric)
+revoke execute on function public.review_card_atomic(uuid, uuid, numeric, numeric, integer, integer, text, timestamptz, date, numeric, numeric, smallint, uuid)
                                                                                  from anon, authenticated, public;
 
 -- Re-assert that only the service role (used by all server routes) can call them.
@@ -1118,7 +1130,7 @@ grant execute on function public.store_user_api_key(uuid, text)                 
 grant execute on function public.store_user_secret(uuid, text, text)             to service_role;
 grant execute on function public.delete_user_api_key(uuid)                       to service_role;
 grant execute on function public.delete_user_secret(uuid, text)                  to service_role;
-grant execute on function public.review_card_atomic(uuid, uuid, numeric, numeric, integer, integer, text, timestamptz, date, numeric)
+grant execute on function public.review_card_atomic(uuid, uuid, numeric, numeric, integer, integer, text, timestamptz, date, numeric, numeric, smallint, uuid)
                                                                                  to service_role;
 
 -- ── 2. Explicit WITH CHECK on all 18 user-scoped policies ────
@@ -1591,5 +1603,63 @@ $$;
 
 revoke all on function public.claim_jobs(int) from anon, authenticated, public;
 grant execute on function public.claim_jobs(int) to service_role;
+
+notify pgrst, 'reload schema';
+
+-- ======================================================================
+-- Section 13: Persistent tutor memory (M1 + M2)
+-- ======================================================================
+-- Episodic memory: one distilled row per finished tutoring session (what was
+-- covered, what confused the student, what they got right, stated preferences).
+-- Written by lib/agents/memory.ts (one Haiku call per session close).
+create table if not exists public.session_summaries (
+  summary_id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references public.users(user_id) on delete cascade,
+  session_id uuid not null unique references public.session_log(session_id) on delete cascade,
+  course_id uuid not null references public.courses(course_id) on delete cascade,
+  summary text not null,
+  confusions text[],
+  understood text[],
+  preferences text[],
+  topics_discussed uuid[],
+  message_count integer,
+  created_at timestamptz not null default now()
+);
+alter table public.session_summaries enable row level security;
+drop policy if exists "session_summaries: own rows only" on public.session_summaries;
+create policy "session_summaries: own rows only" on public.session_summaries
+  for select using (auth.uid() = user_id);
+create index if not exists idx_session_summaries_user_course on public.session_summaries(user_id, course_id, created_at);
+
+-- Rolling per-course digest: ONE capped narrative per (user, course) — what's
+-- been covered across all sessions, persistent confusions, stable preferences.
+-- O(1) prompt tokens per tutor request no matter how many sessions exist.
+create table if not exists public.course_memory (
+  user_id uuid not null references public.users(user_id) on delete cascade,
+  course_id uuid not null references public.courses(course_id) on delete cascade,
+  digest text not null,
+  updated_at timestamptz not null default now(),
+  primary key (user_id, course_id)
+);
+alter table public.course_memory enable row level security;
+drop policy if exists "course_memory: own rows only" on public.course_memory;
+create policy "course_memory: own rows only" on public.course_memory
+  for select using (auth.uid() = user_id);
+
+-- In-session history compaction (M6): once a session transcript outgrows the
+-- verbatim window, the older prefix is summarized once and cached here instead
+-- of being re-sent (and re-billed) on every subsequent turn.
+alter table public.session_log add column if not exists history_summary text;
+alter table public.session_log add column if not exists history_summary_upto integer;
+
+-- MCP-logged study sessions (X3) get their own mode value.
+alter table public.session_log drop constraint if exists session_log_mode_check;
+alter table public.session_log add constraint session_log_mode_check
+  check (mode in ('answer', 'teach', 'focus', 'essay', 'mcp'));
+
+-- The memory distiller runs as a durable job.
+alter table public.jobs drop constraint if exists jobs_kind_check;
+alter table public.jobs add constraint jobs_kind_check
+  check (kind in ('profile', 'embed', 'flashcards', 'distill'));
 
 notify pgrst, 'reload schema';

@@ -126,16 +126,22 @@ export default async function TodayPage() {
     .filter((t): t is FcTask => t.type === 'flashcard_review')
     .map(t => t.course_id)
   if (fcCourseIds.length > 0) {
-    const { data: liveDue } = await service
-      .from('flashcards')
-      .select('course_id')
-      .eq('user_id', user.id)
-      .in('course_id', fcCourseIds)
-      .lte('fsrs_next_review_date', today)
+    // head:count per course — only counts cross the wire, not a row per due card
+    // (the dashboard is the most-visited page; a heavy backlog meant hundreds of
+    // rows fetched just to compute a number).
+    const uniqueFcCourseIds = [...new Set(fcCourseIds)]
     const liveCountByCourse = new Map<string, number>()
-    for (const row of (liveDue ?? []) as { course_id: string }[]) {
-      liveCountByCourse.set(row.course_id, (liveCountByCourse.get(row.course_id) ?? 0) + 1)
-    }
+    await Promise.all(
+      uniqueFcCourseIds.map(async (courseId) => {
+        const { count } = await service
+          .from('flashcards')
+          .select('card_id', { count: 'exact', head: true })
+          .eq('user_id', user.id)
+          .eq('course_id', courseId)
+          .lte('fsrs_next_review_date', today)
+        liveCountByCourse.set(courseId, count ?? 0)
+      })
+    )
     tasks = tasks.map((t): TaskItem => {
       if (t.type !== 'flashcard_review') return t
       return { ...t, card_count: liveCountByCourse.get(t.course_id) ?? 0 }

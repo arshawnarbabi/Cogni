@@ -74,11 +74,13 @@ const STATUS_COL: Record<Provider, string> = {
 /** Record key health on the users row (fire-and-forget; never blocks the caller). */
 export function markKeyStatus(userId: string, provider: Provider, status: KeyStatus): void {
   const service = createServiceClient()
-  void service
-    .from('users')
-    .update({ [STATUS_COL[provider]]: status === 'ok' ? null : status })
-    .eq('user_id', userId)
-    .then(() => {}, (e: unknown) => console.error('[ai] markKeyStatus failed', e))
+  const col = STATUS_COL[provider]
+  let q = service.from('users').update({ [col]: status === 'ok' ? null : status }).eq('user_id', userId)
+  // Only clear when a failure is actually recorded — without this filter, every
+  // successful AI call wrote the users row (pure write amplification on the
+  // hot path for already-healthy keys).
+  if (status === 'ok') q = q.not(col, 'is', null)
+  void q.then(() => {}, (e: unknown) => console.error('[ai] markKeyStatus failed', e))
 }
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
@@ -100,12 +102,14 @@ export async function withRetry<T>(fn: () => Promise<T>, opts: RetryOpts = {}): 
     } catch (e) {
       lastError = e
 
-      // Terminal key problems: record + fail fast (retrying a revoked key 3× is noise).
+      // Terminal key problems: record + fail fast (retrying a revoked or
+      // out-of-credit key 3× is noise — including 429-coded insufficient_quota,
+      // which isRetryable would otherwise treat as a transient rate limit).
       const keyFailure = keyFailureKind(e)
       if (keyFailure && opts.keyHealth) {
         markKeyStatus(opts.keyHealth.userId, opts.keyHealth.provider, keyFailure)
       }
-      if (!isRetryable(e) || attempt === retries) break
+      if (keyFailure || !isRetryable(e) || attempt === retries) break
 
       // Full-jitter exponential backoff; honor provider retry-after when present.
       const cap = Math.min(maxMs, baseMs * 2 ** (attempt - 1))

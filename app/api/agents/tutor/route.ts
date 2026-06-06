@@ -713,6 +713,12 @@ export async function POST(request: Request) {
             assistantSaved = true
           } catch (saveErr) {
             console.error('[tutor] saveMessage failed', saveErr)
+            // B7: the assistant turn was lost — roll back the user message too,
+            // or it burns quota and replays as a question with no answer. (The
+            // streamed text already reached the client live.)
+            if (userMessageId) {
+              await deleteMessage(userMessageId, user.id).catch(e => console.error('[tutor] rollback delete failed', e))
+            }
           }
 
           const isFirstExchange = priorMessages.length === 0

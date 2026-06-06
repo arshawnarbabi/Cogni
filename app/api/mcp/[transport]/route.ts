@@ -2,7 +2,7 @@ import { createMcpHandler, withMcpAuth } from 'mcp-handler'
 import { z } from 'zod'
 import { createServiceClient } from '@/lib/supabase/server'
 import { verifyMcpToken, type McpAuthInfo } from '@/lib/mcp/auth'
-import { mcpGuard, auditMcpCall } from '@/lib/mcp/guards'
+import { mcpGuard, consumeMcpWrite, auditMcpCall } from '@/lib/mcp/guards'
 import { retrieveChunksDetailed } from '@/lib/rag'
 import { readWikiFile } from '@/lib/wiki'
 import { newCardDefaults } from '@/lib/fsrs'
@@ -30,10 +30,26 @@ function asText(obj: unknown) {
 // "Today" in the STUDENT's timezone — the same dateKeyInTimeZone convention every
 // in-app due-date query uses. The MCP tools previously sliced an ISO string (UTC),
 // so due counts disagreed with the app by up to a day for non-UTC users (bug B5).
-async function userToday(service: ReturnType<typeof createServiceClient>, userId: string): Promise<string> {
-  const { data } = await service.from('users').select('timezone').eq('user_id', userId).maybeSingle()
-  const tz = isValidTimeZone(data?.timezone) ? data!.timezone as string : 'UTC'
-  return dateKeyInTimeZone(new Date(), tz)
+// The guard already read the users row, so it passes the timezone through — only
+// fall back to a SELECT if it's missing/invalid.
+async function userToday(
+  service: ReturnType<typeof createServiceClient>,
+  userId: string,
+  tz?: string | null,
+): Promise<string> {
+  let zone = tz
+  if (!isValidTimeZone(zone)) {
+    const { data } = await service.from('users').select('timezone').eq('user_id', userId).maybeSingle()
+    zone = data?.timezone as string | undefined
+  }
+  return dateKeyInTimeZone(new Date(), isValidTimeZone(zone) ? zone as string : 'UTC')
+}
+
+// Expected tool failures (bad input, exhausted budget): audited as ok=false with
+// the code, returned as the standard error envelope — distinct from unexpected
+// throws which become 'internal_error'.
+class McpToolError extends Error {
+  constructor(public code: string, public detailText?: string) { super(code) }
 }
 
 // Every tool runs through this wrapper (F4): auth extraction, the shared guard
@@ -43,24 +59,28 @@ function guarded<A>(
   tool: string,
   kind: 'read' | 'write',
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  handler: (args: A, userId: string) => Promise<any>,
+  handler: (args: A, userId: string, tz: string | null) => Promise<any>,
 ) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return async (args: A, extra: any) => {
     const userId = userIdFrom(extra)
     if (!userId) return asText({ error: 'unauthorized' })
 
-    const blocked = await mcpGuard(userId, kind)
+    const { blocked, timezone } = await mcpGuard(userId, kind)
     if (blocked) {
       auditMcpCall(userId, tool, false, blocked)
       return asText({ error: blocked })
     }
 
     try {
-      const result = await handler(args, userId)
+      const result = await handler(args, userId, timezone)
       auditMcpCall(userId, tool, true)
       return result
     } catch (e) {
+      if (e instanceof McpToolError) {
+        auditMcpCall(userId, tool, false, e.code)
+        return asText({ error: e.code, ...(e.detailText ? { detail: e.detailText } : {}) })
+      }
       console.error(`[mcp] ${tool} failed`, e)
       auditMcpCall(userId, tool, false, e instanceof Error ? e.message : 'error')
       return asText({ error: 'internal_error', detail: 'The tool failed unexpectedly — try again.' })
@@ -104,9 +124,9 @@ const handler = createMcpHandler(
         description: 'Topics (with mastery %), upcoming exams, and pending assignments for a course. Use it to focus tutoring on what the student actually needs.',
         inputSchema: { course_id: z.string().describe('A course_id from list_courses') },
       },
-      guarded('get_course_overview', 'read', async ({ course_id }: { course_id: string }, userId) => {
+      guarded('get_course_overview', 'read', async ({ course_id }: { course_id: string }, userId, tz) => {
         const service = createServiceClient()
-        const today = await userToday(service, userId)
+        const today = await userToday(service, userId, tz)
         const [topics, exams, assignments] = await Promise.all([
           service.from('topics').select('topic_id, name, professor_weight, topic_mastery(mastery_score)').eq('user_id', userId).eq('course_id', course_id),
           service.from('exams').select('date, grade_weight').eq('user_id', userId).eq('course_id', course_id).gte('date', today).order('date'),
@@ -176,9 +196,9 @@ const handler = createMcpHandler(
         description: 'Flashcards the student has due for review today (optionally for one course). Useful for running a quick review.',
         inputSchema: { course_id: z.string().optional() },
       },
-      guarded('get_due_cards', 'read', async ({ course_id }: { course_id?: string }, userId) => {
+      guarded('get_due_cards', 'read', async ({ course_id }: { course_id?: string }, userId, tz) => {
         const service = createServiceClient()
-        const today = await userToday(service, userId)
+        const today = await userToday(service, userId, tz)
         let q = service.from('flashcards').select('card_id, front, back, hint, course_id, topic_id').eq('user_id', userId).lte('fsrs_next_review_date', today).limit(50)
         if (course_id) q = q.eq('course_id', course_id)
         const { data } = await q
@@ -205,17 +225,22 @@ const handler = createMcpHandler(
       guarded('create_flashcards', 'write', async (
         { course_id, topic_id, cards }: { course_id: string; topic_id: string; cards: { front: string; back: string; hint?: string }[] },
         userId,
+        guardTz,
       ) => {
         const service = createServiceClient()
         // Verify the topic belongs to this user + course (don't trust client IDs).
         const { data: topic } = await service.from('topics').select('topic_id').eq('topic_id', topic_id).eq('user_id', userId).eq('course_id', course_id).maybeSingle()
-        if (!topic) return asText({ error: 'topic_not_found', detail: 'topic_id must belong to the given course_id (call get_course_overview).' })
+        if (!topic) throw new McpToolError('topic_not_found', 'topic_id must belong to the given course_id (call get_course_overview).')
+
+        // Burn the write budget only AFTER validation — a rejected request must
+        // not eat the daily allowance.
+        const overBudget = await consumeMcpWrite(userId)
+        if (overBudget) throw new McpToolError('daily_limit', overBudget)
 
         // Pace new cards through the same daily-introduction budget the in-app
         // generator uses — previously MCP cards all landed due-today (B11),
         // dumping a wall of cards on the student.
-        const { data: tzRow } = await service.from('users').select('timezone').eq('user_id', userId).maybeSingle()
-        const tz = isValidTimeZone(tzRow?.timezone) ? tzRow!.timezone as string : 'UTC'
+        const tz = isValidTimeZone(guardTz) ? guardTz as string : 'UTC'
         const dueDates = await assignNewCardDueDates(service, userId, cards.length, tz)
 
         const defaults = newCardDefaults()
@@ -227,8 +252,11 @@ const handler = createMcpHandler(
             fsrs_next_review_date: dueDates[i],
           })),
         )
-        if (error) return asText({ error: 'insert_failed' })
-        const dueToday = dueDates.filter((d) => d === dueDates[0]).length
+        if (error) throw new McpToolError('insert_failed')
+        // Count against the REAL today — when today's new-card budget is already
+        // full, dueDates[0] is tomorrow and the old count was wrong.
+        const todayKey = dateKeyInTimeZone(new Date(), tz)
+        const dueToday = dueDates.filter((d) => d === todayKey).length
         return asText({ created: cards.length, message: `${cards.length} flashcards saved to Cogni (${dueToday} enter the review queue today; the rest are paced over the coming days).` })
       }),
     )

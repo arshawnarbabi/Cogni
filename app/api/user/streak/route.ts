@@ -1,6 +1,5 @@
-import { createClient, createServiceClient } from '@/lib/supabase/server'
-import { addDaysToDateKey, dateKeyInTimeZone } from '@/lib/time'
-import { serverError } from '@/lib/api-error'
+import { createClient } from '@/lib/supabase/server'
+import { bumpStudyStreak } from '@/lib/streak'
 import { NextResponse } from 'next/server'
 
 export async function POST() {
@@ -8,31 +7,8 @@ export async function POST() {
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
-  const service = createServiceClient()
-
-  const { data: row } = await service
-    .from('users')
-    .select('study_streak, last_study_date, timezone')
-    .eq('user_id', user.id)
-    .single()
-
-  if (!row) return NextResponse.json({ ok: true })
-
-  const today = dateKeyInTimeZone(new Date(), row.timezone ?? 'UTC')
-  const yesterday = addDaysToDateKey(today, -1)
-
-  // Already updated today
-  if (row.last_study_date === today) return NextResponse.json({ ok: true, streak: row.study_streak })
-
-  const newStreak = row.last_study_date === yesterday
-    ? (row.study_streak ?? 0) + 1  // consecutive day
-    : 1                              // streak broken, restart
-
-  const { error } = await service
-    .from('users')
-    .update({ study_streak: newStreak, last_study_date: today })
-    .eq('user_id', user.id)
-  if (error) return serverError('user/streak POST', error)
-
-  return NextResponse.json({ ok: true, streak: newStreak })
+  // Shared logic with the MCP log_study_session tool (lib/streak.ts).
+  const streak = await bumpStudyStreak(user.id)
+  if (streak === null) return NextResponse.json({ ok: true })
+  return NextResponse.json({ ok: true, streak })
 }

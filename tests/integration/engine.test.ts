@@ -14,6 +14,11 @@ const masteryOf = async (topicId: string) => {
   const { data } = await db.from('topic_mastery').select('mastery_score').eq('user_id', seed.userId).eq('topic_id', topicId).maybeSingle()
   return data ? Number(data.mastery_score) : null
 }
+// The RPC scales the learning rate by 1/sqrt(cards in the topic) under its lock.
+const deckScaledLr = async (topicId: string, baseLr: number) => {
+  const { count } = await db.from('flashcards').select('*', { count: 'exact', head: true }).eq('user_id', seed.userId).eq('topic_id', topicId)
+  return baseLr / Math.sqrt(Math.max(1, count ?? 1))
+}
 const historyCount = async (topicId: string) => {
   const { count } = await db.from('mastery_history').select('*', { count: 'exact', head: true }).eq('user_id', seed.userId).eq('topic_id', topicId)
   return count ?? 0
@@ -42,8 +47,9 @@ describe('review_card_atomic RPC (evidence model, F3)', () => {
     expect(card!.fsrs_reps).toBe(99)
     expect(card!.fsrs_next_review_date).toBe('2099-01-01')
 
-    // 0.5 + 0.2 * (0.75 - 0.5) = 0.55
-    expect(await masteryOf(topic)).toBeCloseTo(0.55, 5)
+    // EWMA with the deck-scaled rate: 0.5 + lr/sqrt(deck) * (0.75 - 0.5)
+    const lr = await deckScaledLr(topic, 0.2)
+    expect(await masteryOf(topic)).toBeCloseTo(0.5 + lr * 0.25, 4)
     expect(await historyCount(topic)).toBe(before + 1)     // history written
   })
 

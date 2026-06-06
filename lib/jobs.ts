@@ -4,6 +4,7 @@ import { createServiceClient } from '@/lib/supabase/server'
 import { runProfiler } from '@/lib/agents/profiler'
 import { autoGenerateFlashcards } from '@/lib/agents/flashcard'
 import { processEmbeddings } from '@/lib/rag'
+import { distillSession } from '@/lib/agents/memory'
 import { isRetryable } from '@/lib/ai/call'
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -20,7 +21,7 @@ import { isRetryable } from '@/lib/ai/call'
 // table instead of vanishing.
 // ─────────────────────────────────────────────────────────────────────────────
 
-export type JobKind = 'profile' | 'embed' | 'flashcards'
+export type JobKind = 'profile' | 'embed' | 'flashcards' | 'distill'
 
 type JobRow = {
   job_id: string
@@ -55,6 +56,33 @@ export async function enqueueJob(
     return null
   }
   return data?.job_id ?? null
+}
+
+/**
+ * Arm (or re-arm) the memory-distill job for a session (M1). One queued job per
+ * session; each new message pushes run_after out, so the distiller fires ~45min
+ * after the LAST message — the "session ended" heuristic. Sessions distill via
+ * the post-response drain of a later request or the daily cron sweep, with a
+ * lazy inline fallback at next session-open.
+ */
+export async function armDistillJob(userId: string, sessionId: string, delayMs = 45 * 60_000): Promise<void> {
+  const service = createServiceClient()
+  const runAfter = new Date(Date.now() + delayMs)
+  const { data: updated, error } = await service
+    .from('jobs')
+    .update({ run_after: runAfter.toISOString(), updated_at: new Date().toISOString() })
+    .eq('user_id', userId)
+    .eq('kind', 'distill')
+    .eq('status', 'queued')
+    .eq('subject_id', sessionId)
+    .select('job_id')
+  if (error) {
+    console.error('[jobs] armDistillJob re-arm failed', error)
+    return
+  }
+  if (!updated || updated.length === 0) {
+    await enqueueJob(userId, 'distill', { subjectId: sessionId, runAfter })
+  }
 }
 
 // Drain due jobs after the current response is sent (after() keeps the lambda
@@ -97,6 +125,13 @@ async function dispatch(job: JobRow): Promise<void> {
       const { courseId } = job.payload as { courseId?: string }
       if (!courseId) throw new Error('flashcards job missing courseId')
       await autoGenerateFlashcards(job.user_id, courseId)
+      return
+    }
+    case 'distill': {
+      // subject_id = session_id. distillSession is idempotent (skips if a
+      // summary already exists), so re-arms/replays are harmless.
+      if (!job.subject_id) throw new Error('distill job missing subject_id')
+      await distillSession(job.user_id, job.subject_id)
       return
     }
   }

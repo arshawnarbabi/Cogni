@@ -1,6 +1,6 @@
 import { createClient, createServiceClient } from '@/lib/supabase/server'
 import { scheduleReview } from '@/lib/fsrs'
-import { flashcardEvidence } from '@/lib/mastery'
+import { flashcardObserved, LEARNING_RATES } from '@/lib/mastery'
 import { NextResponse } from 'next/server'
 import { serverError } from '@/lib/api-error'
 
@@ -56,20 +56,13 @@ export async function POST(request: Request) {
     fsrs_next_review_date: card.fsrs_next_review_date,
   }, rating, timeZone)
 
-  // Unified mastery evidence (F3): the rating maps to an observed level and a
-  // learning rate scaled by 1/sqrt(cards in this topic), applied as an EWMA
-  // inside the RPC — replacing the old flat additive delta that drifted with
+  // Unified mastery evidence (F3): the rating maps to an observed level; the
+  // RPC scales the base learning rate by 1/sqrt(cards in this topic) under the
+  // row lock it already holds (no extra count round trip per rating tap) and
+  // applies the EWMA — replacing the old flat additive delta that drifted with
   // review volume and disagreed with the tutor/quiz scales (B4).
-  let cardsInTopic = 1
-  if (card.topic_id) {
-    const { count } = await service
-      .from('flashcards')
-      .select('card_id', { count: 'exact', head: true })
-      .eq('user_id', user.id)
-      .eq('topic_id', card.topic_id)
-    cardsInTopic = count ?? 1
-  }
-  const { observed, learningRate } = flashcardEvidence(rating, cardsInTopic)
+  const observed = flashcardObserved(rating)
+  const learningRate = LEARNING_RATES.flashcard_base
 
   const { error: rpcError } = await service.rpc('review_card_atomic', {
     p_card_id: cardId,
