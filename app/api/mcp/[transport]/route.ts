@@ -5,9 +5,13 @@ import { verifyMcpToken, type McpAuthInfo } from '@/lib/mcp/auth'
 import { mcpGuard, consumeMcpWrite, auditMcpCall } from '@/lib/mcp/guards'
 import { retrieveChunksDetailed } from '@/lib/rag'
 import { readWikiFile } from '@/lib/wiki'
-import { newCardDefaults } from '@/lib/fsrs'
+import { newCardDefaults, scheduleReview } from '@/lib/fsrs'
 import { assignNewCardDueDates } from '@/lib/agents/flashcard'
+import { applyMasteryEvidence, flashcardObserved, LEARNING_RATES } from '@/lib/mastery'
+import { bumpStudyStreak } from '@/lib/streak'
+import { DIGEST_CHAR_BUDGET } from '@/lib/agents/memory'
 import { dateKeyInTimeZone, isValidTimeZone } from '@/lib/time'
+import crypto from 'node:crypto'
 
 export const runtime = 'nodejs'
 export const maxDuration = 60
@@ -93,7 +97,11 @@ const TUTOR_GUIDE = `You are tutoring this student using Cogni's tools, which gi
 - Ground everything in THEIR materials: call \`search_materials\` for the relevant topic before explaining, and treat retrieved excerpts as authoritative over your general knowledge (a professor's non-standard rule wins).
 - Know where they stand: use \`get_course_overview\` and \`get_weak_topics\` to focus on what matters (high professor-weight, low mastery, upcoming exams).
 - Teach, don't just answer: prefer guiding questions; explain at the student's level; be blunt and constructive when they're wrong. No emojis, no filler.
-- Act: after explaining a discrete body of facts, offer to call \`create_flashcards\` so it lands in their spaced-repetition queue. Point them at \`get_due_cards\` when they want to review.
+- Make the study COUNT — write results back so the in-app plan stays accurate:
+  - Run reviews: fetch \`get_due_cards\`, quiz the student on each card conversationally, judge their answer, and call \`review_card\` (1=Again, 2=Hard, 3=Good, 4=Easy). Unrecorded reviews don't reschedule anything.
+  - After the student answers a verification question you posed, call \`grade_answer\` with the topic_id and a 0–1 score so their mastery moves.
+  - After explaining a discrete body of facts, offer \`create_flashcards\` so it lands in their spaced-repetition queue.
+  - At the END of the session, call \`log_study_session\` with a 2-3 sentence summary — it records the session in their Cogni history, feeds their cross-session memory, and keeps their study streak alive.
 - Stay on their course. Use proper markdown. Don't fabricate — if it's not in their materials, say so.
 
 Start by calling \`list_courses\`, then \`get_course_overview\` (and \`get_weak_topics\`) for the course they want help with.`
@@ -271,6 +279,183 @@ const handler = createMcpHandler(
       guarded('get_learning_profile', 'read', async (_args, userId) => {
         const profile = await readWikiFile(userId, 'learning_profile.md').catch(() => null)
         return asText(profile || 'No learning profile yet — it builds up as the student studies.')
+      }),
+    )
+
+    server.registerTool(
+      'review_card',
+      {
+        title: 'Record a flashcard review',
+        description: "Record the student's rating for a flashcard (1=Again, 2=Hard, 3=Good, 4=Easy). Updates FSRS scheduling AND topic mastery in Cogni — call this after quizzing the student on each card from get_due_cards, so the review session actually counts (reschedules the card, moves their mastery, keeps the in-app queue accurate).",
+        inputSchema: {
+          card_id: z.string().describe('A card_id from get_due_cards'),
+          rating: z.number().int().min(1).max(4).describe('1=Again (failed), 2=Hard, 3=Good, 4=Easy'),
+        },
+      },
+      guarded('review_card', 'write', async (
+        { card_id, rating }: { card_id: string; rating: number },
+        userId,
+        guardTz,
+      ) => {
+        const service = createServiceClient()
+        const { data: card } = await service
+          .from('flashcards')
+          .select('card_id, fsrs_stability, fsrs_difficulty, fsrs_reps, fsrs_lapses, fsrs_state, fsrs_last_review, fsrs_next_review_date')
+          .eq('card_id', card_id)
+          .eq('user_id', userId)
+          .maybeSingle()
+        if (!card) throw new McpToolError('card_not_found', 'card_id must come from get_due_cards.')
+
+        const overBudget = await consumeMcpWrite(userId)
+        if (overBudget) throw new McpToolError('daily_limit', overBudget)
+
+        const tz = isValidTimeZone(guardTz) ? guardTz as string : 'UTC'
+        const r = rating as 1 | 2 | 3 | 4
+        const next = scheduleReview({
+          fsrs_stability: Number(card.fsrs_stability),
+          fsrs_difficulty: Number(card.fsrs_difficulty),
+          fsrs_reps: card.fsrs_reps,
+          fsrs_lapses: card.fsrs_lapses,
+          fsrs_state: card.fsrs_state,
+          fsrs_last_review: card.fsrs_last_review,
+          fsrs_next_review_date: card.fsrs_next_review_date,
+        }, r, tz)
+
+        // Same atomic RPC + evidence model as the in-app review route (F3/B6).
+        const { error } = await service.rpc('review_card_atomic', {
+          p_card_id: card_id,
+          p_user_id: userId,
+          p_fsrs_stability: next.fsrs_stability,
+          p_fsrs_difficulty: next.fsrs_difficulty,
+          p_fsrs_reps: next.fsrs_reps,
+          p_fsrs_lapses: next.fsrs_lapses,
+          p_fsrs_state: next.fsrs_state,
+          p_fsrs_last_review: next.fsrs_last_review,
+          p_fsrs_next_review_date: next.fsrs_next_review_date,
+          p_observed: flashcardObserved(r),
+          p_learning_rate: LEARNING_RATES.flashcard_base,
+          p_rating: r,
+          p_client_review_id: crypto.randomUUID(),
+        })
+        if (error) throw new McpToolError('review_failed')
+        return asText({ ok: true, next_due: next.fsrs_next_review_date, message: `Recorded. This card comes back ${next.fsrs_next_review_date}.` })
+      }),
+    )
+
+    server.registerTool(
+      'grade_answer',
+      {
+        title: 'Grade a verification answer',
+        description: "Record how well the student understood a topic (0.0–1.0) after they answered a question you posed. Moves their Cogni mastery score — without this, an hour of tutoring changes nothing in their study plan. Use topic_id from get_course_overview / get_weak_topics.",
+        inputSchema: {
+          topic_id: z.string().describe('A topic_id from get_course_overview'),
+          score: z.number().min(0).max(1).describe('0.0 = no understanding, 1.0 = complete understanding'),
+        },
+      },
+      guarded('grade_answer', 'write', async (
+        { topic_id, score }: { topic_id: string; score: number },
+        userId,
+      ) => {
+        const service = createServiceClient()
+        const { data: topic } = await service
+          .from('topics').select('topic_id, name')
+          .eq('topic_id', topic_id).eq('user_id', userId).maybeSingle()
+        if (!topic) throw new McpToolError('topic_not_found', 'topic_id must come from get_course_overview / get_weak_topics.')
+
+        const overBudget = await consumeMcpWrite(userId)
+        if (overBudget) throw new McpToolError('daily_limit', overBudget)
+
+        // Same evidence model + learning rate as the in-app tutor's grade_answer.
+        const [applied] = await applyMasteryEvidence(userId, [{
+          topicId: topic_id,
+          observed: Math.min(1, Math.max(0, score)),
+          learningRate: LEARNING_RATES.tutor_grade,
+        }])
+        return asText({
+          ok: true,
+          topic: topic.name,
+          mastery_before_pct: Math.round(applied.oldScore * 100),
+          mastery_now_pct: Math.round(applied.newScore * 100),
+        })
+      }),
+    )
+
+    server.registerTool(
+      'log_study_session',
+      {
+        title: 'Log this study session to Cogni',
+        description: "Call at the END of a tutoring/study session: records it in the student's Cogni history, feeds their cross-session memory, and keeps their study streak alive. Without this, study done here is invisible in the app.",
+        inputSchema: {
+          course_id: z.string().describe('A course_id from list_courses'),
+          summary: z.string().min(10).max(2000).describe('2-3 sentences: what was covered, what the student struggled with, what they got right'),
+          topic_ids: z.array(z.string()).max(12).optional().describe('topic_ids touched this session (from get_course_overview)'),
+          minutes: z.number().int().positive().max(600).optional().describe('approximate session length in minutes'),
+        },
+      },
+      guarded('log_study_session', 'write', async (
+        { course_id, summary, topic_ids, minutes }: { course_id: string; summary: string; topic_ids?: string[]; minutes?: number },
+        userId,
+      ) => {
+        const service = createServiceClient()
+        const { data: course } = await service
+          .from('courses').select('course_id, name')
+          .eq('course_id', course_id).eq('user_id', userId).maybeSingle()
+        if (!course) throw new McpToolError('course_not_found', 'course_id must come from list_courses.')
+
+        const overBudget = await consumeMcpWrite(userId)
+        if (overBudget) throw new McpToolError('daily_limit', overBudget)
+
+        // Validate topic ids against THIS user+course (never trust client ids).
+        let validTopicIds: string[] = []
+        if (topic_ids && topic_ids.length > 0) {
+          const { data: owned } = await service
+            .from('topics').select('topic_id')
+            .eq('user_id', userId).eq('course_id', course_id).in('topic_id', topic_ids)
+          validTopicIds = (owned ?? []).map((t: { topic_id: string }) => t.topic_id)
+        }
+
+        const { data: session, error: sessionError } = await service
+          .from('session_log')
+          .insert({
+            user_id: userId,
+            course_id,
+            mode: 'mcp',
+            name: `Claude session — ${course.name}`,
+            topics_discussed: validTopicIds.length > 0 ? validTopicIds : null,
+            duration_seconds: minutes ? minutes * 60 : null,
+          })
+          .select('session_id')
+          .single()
+        if (sessionError || !session) throw new McpToolError('log_failed')
+
+        // Feed the same episodic memory the in-app distiller writes (M1), so the
+        // in-app tutor's recap knows about MCP study too.
+        await service.from('session_summaries').insert({
+          user_id: userId,
+          session_id: session.session_id,
+          course_id,
+          summary: summary.slice(0, 1200),
+          topics_discussed: validTopicIds.length > 0 ? validTopicIds : null,
+        })
+
+        // Cheap, inference-free digest append (clamped — the next in-app distill
+        // re-compresses everything properly).
+        const { data: mem } = await service
+          .from('course_memory').select('digest')
+          .eq('user_id', userId).eq('course_id', course_id).maybeSingle()
+        const appended = `${mem?.digest ?? ''}\n- (via the student's own Claude) ${summary.slice(0, 240)}`.trim()
+        await service.from('course_memory').upsert({
+          user_id: userId,
+          course_id,
+          digest: appended.slice(-DIGEST_CHAR_BUDGET),
+          updated_at: new Date().toISOString(),
+        }, { onConflict: 'user_id,course_id' })
+
+        const streak = await bumpStudyStreak(userId)
+        return asText({
+          ok: true,
+          message: `Session logged to Cogni${streak ? ` — study streak: ${streak} day${streak === 1 ? '' : 's'}` : ''}.`,
+        })
       }),
     )
 

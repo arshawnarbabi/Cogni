@@ -216,6 +216,91 @@ Rules: be specific and factual — only what the transcript supports. Empty arra
   return true
 }
 
+// ── In-session history compaction (M6) ──────────────────────────────────────
+// The tutor previously re-sent the ENTIRE session transcript on every turn —
+// O(n²) total tokens over a long session, all on the student's key. Once the
+// transcript outgrows the verbatim window, the older prefix is summarized ONCE
+// (cached in session_log.history_summary / history_summary_upto) and re-used
+// until enough new turns accumulate to re-summarize.
+
+export const HISTORY_VERBATIM_WINDOW = 12  // most recent messages sent verbatim
+export const HISTORY_COMPACT_TRIGGER = 20  // compact once history exceeds this
+const HISTORY_RESUMMARIZE_SLACK = 6        // re-summarize after this many newly-evicted turns
+
+export type CompactedHistory = {
+  /** Synthetic context block describing the elided prefix ('' if none). */
+  summaryBlock: string
+  /** The messages to send verbatim. */
+  messages: { role: string; content: string }[]
+}
+
+export async function compactHistory(
+  userId: string,
+  sessionId: string,
+  priorMessages: { role: string; content: string }[],
+  apiKey: string,
+): Promise<CompactedHistory> {
+  if (priorMessages.length <= HISTORY_COMPACT_TRIGGER) {
+    return { summaryBlock: '', messages: priorMessages }
+  }
+
+  const service = createServiceClient()
+  const evictCount = priorMessages.length - HISTORY_VERBATIM_WINDOW
+  const evicted = priorMessages.slice(0, evictCount)
+  const kept = priorMessages.slice(evictCount)
+
+  const { data: session } = await service
+    .from('session_log')
+    .select('history_summary, history_summary_upto')
+    .eq('session_id', sessionId)
+    .eq('user_id', userId)
+    .maybeSingle()
+
+  const cachedUpto = session?.history_summary_upto ?? 0
+  const cachedSummary = (session?.history_summary as string | null) ?? null
+
+  // Reuse the cached summary while it still covers (most of) the evicted prefix.
+  if (cachedSummary && cachedUpto >= evictCount - HISTORY_RESUMMARIZE_SLACK) {
+    // Include any evicted-but-not-yet-summarized turns verbatim so nothing is lost.
+    const gap = priorMessages.slice(Math.min(cachedUpto, evictCount), evictCount)
+    return { summaryBlock: cachedSummary, messages: [...gap, ...kept] }
+  }
+
+  // (Re-)summarize the evicted prefix: previous summary + newly evicted turns.
+  try {
+    const client = new Anthropic({ apiKey })
+    const newPart = renderTranscript(evicted.slice(cachedSummary ? cachedUpto : 0))
+    const response = await withRetry(() => client.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 700,
+      messages: [{
+        role: 'user',
+        content: `Compress this tutoring-session history into a compact "conversation so far" brief (max ~250 words). Preserve: concepts covered and conclusions reached, what the student got right/wrong, unresolved questions, and any commitments ("we'll do a quiz next"). Drop pleasantries and redundancy.
+
+${cachedSummary ? `EXISTING BRIEF (covers the earlier part):\n${cachedSummary}\n\nNEW TURNS TO FOLD IN:` : 'TRANSCRIPT:'}
+${newPart}
+
+Return ONLY the updated brief text.`,
+      }],
+    }), { label: 'memory.compact', keyHealth: { userId, provider: 'anthropic' } })
+
+    const summary = response.content[0]?.type === 'text' ? response.content[0].text.trim() : ''
+    if (summary) {
+      await service.from('session_log').update({
+        history_summary: summary.slice(0, 4000),
+        history_summary_upto: evictCount,
+        updated_at: new Date().toISOString(),
+      }).eq('session_id', sessionId).eq('user_id', userId)
+      return { summaryBlock: summary.slice(0, 4000), messages: kept }
+    }
+  } catch (e) {
+    console.error('[memory] history compaction failed (sending full history)', e)
+  }
+
+  // Compaction failed — fall back to the full transcript (correct, just costlier).
+  return { summaryBlock: '', messages: priorMessages }
+}
+
 /**
  * Lazy fallback for session-open (M5): if the student's most recent OTHER
  * session for this course was never distilled (the 45-min job hasn't drained —

@@ -1,6 +1,8 @@
 import { createServiceClient } from '@/lib/supabase/server'
 import { readWikiFile } from '@/lib/wiki'
 import { dateKeyInTimeZone, startOfLocalDayUtc } from '@/lib/time'
+import { getCourseMemory } from '@/lib/agents/memory'
+import { clampBlock } from '@/lib/agents/context-budget'
 
 export type TutorMode = 'answer' | 'teach' | 'focus'
 
@@ -65,13 +67,14 @@ export async function buildTutorSystemPrompt(
   courseId: string,
   courseName: string,
   mode: TutorMode,
-  opts?: { essayMode?: boolean; assistanceLevel?: AssistanceLevel; courseType?: string; professorId?: string; ragContext?: string; topics?: { topic_id: string; name: string }[] }
-): Promise<{ static: string; dynamic: string }> {
+  opts?: { essayMode?: boolean; assistanceLevel?: AssistanceLevel; courseType?: string; professorId?: string; ragContext?: string; topics?: { topic_id: string; name: string }[]; isSessionOpen?: boolean }
+): Promise<{ static: string; rag: string; dynamic: string }> {
   const service = createServiceClient()
 
-  const [learningProfile, professorWiki] = await Promise.all([
+  const [learningProfile, professorWiki, courseMemory] = await Promise.all([
     readWikiFile(userId, 'learning_profile.md'),
     opts?.professorId ? readWikiFile(userId, `professor_${opts.professorId}.md`) : Promise.resolve(null),
+    getCourseMemory(userId, courseId).catch(() => null),
   ])
 
   const { data: mastery } = await service
@@ -105,12 +108,24 @@ Do NOT ask verification or check-your-understanding questions. The student wants
     ? `\n## Course topics (use these IDs when creating artifacts)\nWhen calling create_flashcards or create_quiz, set topic_id to the ID of the best-matching topic from this list. Pick the closest match — if nothing fits well, use the most general relevant topic.\n\n${opts.topics.map(t => `- ${t.topic_id} — ${t.name}`).join('\n')}`
     : ''
 
-  const ragSection = opts?.ragContext
-    ? `\n## Retrieved course material\nThe following excerpts come directly from the student's uploaded course files. Treat this as authoritative — it overrides your general knowledge. Do NOT contradict, second-guess, or "correct" information found here based on what you think is standard. If the file says something unusual (e.g. a non-standard constant, a professor-specific rule), trust it and relay it accurately.\n\n${opts.ragContext}`
+  // C1: the RAG excerpts are returned as their OWN block so the route can mark
+  // them with cache_control — within a turn's tool-loop iterations (up to 5 API
+  // calls) and across follow-up turns on the same topic, the chunks are
+  // byte-identical, so this turns the largest repeated payload after history
+  // into cache reads instead of full-price input tokens.
+  const ragBlock = opts?.ragContext
+    ? `## Retrieved course material\nThe following excerpts come directly from the student's uploaded course files. Treat this as authoritative — it overrides your general knowledge. Do NOT contradict, second-guess, or "correct" information found here based on what you think is standard. If the file says something unusual (e.g. a non-standard constant, a professor-specific rule), trust it and relay it accurately.\n\n${clampBlock('rag', opts.ragContext)}`
     : ''
 
   const professorSection = professorWiki
-    ? `\n## Professor profile\nThis is what is known about the professor who teaches ${courseName}. Use this to tailor explanations, anticipate exam-style questions, and calibrate depth to how this professor tests.\n\n${professorWiki}`
+    ? `\n## Professor profile\nThis is what is known about the professor who teaches ${courseName}. Use this to tailor explanations, anticipate exam-style questions, and calibrate depth to how this professor tests.\n\n${clampBlock('professor', professorWiki)}`
+    : ''
+
+  // M2 + M5: the rolling per-course memory digest, plus an explicit instruction
+  // to open with a one-line recap when this is the first message of a session —
+  // memory the student can't perceive feels like no memory.
+  const memorySection = courseMemory?.digest
+    ? `\n## What you remember about this student in this course\nBuilt from your previous sessions together. Use it for continuity — reference prior work naturally, don't re-teach what they've mastered, and watch for their known confusions.\n\n${clampBlock('course_memory', courseMemory.digest)}${opts?.isSessionOpen ? `\n\nThis is the FIRST message of a new session: open your reply with ONE short line of continuity (e.g. "Welcome back — last time X tripped you up; want to pick that up or start fresh?") before addressing their message. Keep it to a single line; skip it if their message clearly starts something unrelated.` : ''}`
     : ''
 
   // ── STATIC block — identical for EVERY student, course, mode, and turn. The route
@@ -172,11 +187,11 @@ ${MODE_INSTRUCTIONS[mode]}
 - **Focus mode** (${mode === 'focus' ? 'CURRENT' : 'not active'}): Aggressively steer the student toward their weakest topics using these tools. End most responses by offering flashcards or a quiz specifically on a weak area from the list below. This is the primary way Focus mode earns its name — not just mentioning weak areas, but acting on them.
 
 ## Context
-${learningProfile ?? ''}
-${weakTopics ? `\nCurrent weak areas:\n${weakTopics}` : ''}
+${clampBlock('learning_profile', learningProfile)}
+${weakTopics ? `\nCurrent weak areas:\n${clampBlock('weak_topics', weakTopics)}` : ''}
+${memorySection}
 ${professorSection}
-${topicsSection}
-${ragSection}
+${clampBlock('topics_list', topicsSection)}
 ${verificationSection}
 
 ## Course guardrail
@@ -185,7 +200,7 @@ ${verificationSection}
 Current mode: ${mode}
 ${essaySection}`
 
-  return { static: staticBlock, dynamic: dynamicBlock }
+  return { static: staticBlock, rag: ragBlock, dynamic: dynamicBlock }
 }
 
 export async function createSession(

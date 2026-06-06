@@ -250,7 +250,52 @@ export async function gradeAndRecord(
 ): Promise<GradeSummary> {
   const service = createServiceClient()
 
-  // Grade each question
+  // C3: grade ALL short-answer questions in ONE Haiku call. Previously one
+  // sequential call per question — a 10-question quiz meant 10 serial round
+  // trips the student sat through after submitting, at 10x the request overhead.
+  const shortAnswerIdx: number[] = []
+  for (let i = 0; i < questions.length; i++) {
+    if (questions[i].type !== 'mc' && (userAnswers[i] ?? '').trim()) shortAnswerIdx.push(i)
+  }
+
+  const gradedShort = new Map<number, { score: number; correct: boolean; feedback?: string }>()
+  if (apiKey && shortAnswerIdx.length > 0) {
+    try {
+      const client = new Anthropic({ apiKey })
+      const items = shortAnswerIdx
+        .map((qi, n) => `#${n + 1}\nQuestion: ${questions[qi].question}\nModel answer: ${questions[qi].answer}\nStudent answer: ${userAnswers[qi]}`)
+        .join('\n\n')
+      const msg = await withRetry(() => client.messages.create({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: Math.min(4096, 150 * shortAnswerIdx.length + 200),
+        messages: [{
+          role: 'user',
+          content: `Grade these ${shortAnswerIdx.length} student answers.
+
+${items}
+
+Return ONLY a JSON array with exactly ${shortAnswerIdx.length} objects, one per item IN ORDER:
+[{"score": 0.0-1.0, "correct": true/false, "feedback": "one sentence"}, ...]`,
+        }],
+      }), { label: 'quiz.grade-batch', retries: 2, keyHealth: { userId, provider: 'anthropic' } })
+      const raw = msg.content[0].type === 'text' ? msg.content[0].text : '[]'
+      const cleaned = raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')
+      const arrMatch = cleaned.match(/\[[\s\S]*\]/)
+      const parsed = JSON.parse(arrMatch ? arrMatch[0] : cleaned)
+      if (Array.isArray(parsed)) {
+        parsed.slice(0, shortAnswerIdx.length).forEach((g: { score?: number; correct?: boolean; feedback?: string }, n: number) => {
+          gradedShort.set(shortAnswerIdx[n], {
+            score: Math.min(1, Math.max(0, Number(g?.score ?? 0))),
+            correct: g?.correct === true,
+            feedback: typeof g?.feedback === 'string' ? g.feedback : undefined,
+          })
+        })
+      }
+    } catch (e) {
+      console.error('[practice-quiz] batch grading failed, using length heuristic', e)
+    }
+  }
+
   const results: QuizResult[] = []
   for (let i = 0; i < questions.length; i++) {
     const q = questions[i]
@@ -259,33 +304,15 @@ export async function gradeAndRecord(
     if (q.type === 'mc') {
       const correct = ua.trim().toLowerCase() === q.answer.trim().toLowerCase()
       results.push({ question: q, userAnswer: ua, correct, score: correct ? 1 : 0 })
+    } else if (gradedShort.has(i)) {
+      const g = gradedShort.get(i)!
+      results.push({ question: q, userAnswer: ua, correct: g.correct, score: g.score, feedback: g.feedback })
+    } else if (apiKey && ua.trim()) {
+      // Batch call failed — same length heuristic the per-question fallback used.
+      const correct = ua.trim().length > 10
+      results.push({ question: q, userAnswer: ua, correct, score: correct ? 0.5 : 0 })
     } else {
-      // Short answer — use Haiku if apiKey available
-      if (apiKey && ua.trim()) {
-        const client = new Anthropic({ apiKey })
-        try {
-          const msg = await withRetry(() => client.messages.create({
-            model: 'claude-haiku-4-5-20251001',
-            max_tokens: 200,
-            messages: [{
-              role: 'user',
-              content: `Grade this student answer.
-Question: ${q.question}
-Model answer: ${q.answer}
-Student answer: ${ua}
-Return JSON only: {"score": 0.0-1.0, "correct": true/false, "feedback": "one sentence"}`,
-            }],
-          }), { label: 'quiz.grade', retries: 2, keyHealth: { userId, provider: 'anthropic' } })
-          const raw = msg.content[0].type === 'text' ? msg.content[0].text : '{}'
-          const g = JSON.parse(raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, ''))
-          results.push({ question: q, userAnswer: ua, correct: !!g.correct, score: g.score ?? 0, feedback: g.feedback })
-        } catch {
-          const correct = ua.trim().length > 10
-          results.push({ question: q, userAnswer: ua, correct, score: correct ? 0.5 : 0 })
-        }
-      } else {
-        results.push({ question: q, userAnswer: ua, correct: false, score: 0, feedback: 'Could not auto-grade' })
-      }
+      results.push({ question: q, userAnswer: ua, correct: false, score: 0, feedback: 'Could not auto-grade' })
     }
   }
 

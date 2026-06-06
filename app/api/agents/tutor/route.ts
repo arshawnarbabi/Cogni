@@ -19,6 +19,8 @@ import { newCardDefaults } from '@/lib/fsrs'
 import { retrieveChunks } from '@/lib/rag'
 import { applyMasteryEvidence, resolveTopicByName, LEARNING_RATES } from '@/lib/mastery'
 import { keyFailureKind, markKeyStatus } from '@/lib/ai/call'
+import { compactHistory, distillPreviousSessionIfNeeded } from '@/lib/agents/memory'
+import { armDistillJob, kickJobs } from '@/lib/jobs'
 import Anthropic from '@anthropic-ai/sdk'
 import { NextResponse } from 'next/server'
 
@@ -201,6 +203,16 @@ export async function POST(request: Request) {
     ?? (forceNew
       ? await createSession(user.id, courseId, mode)
       : await getOrCreateSession(user.id, courseId, mode))
+
+  // First message of a UI-new conversation: make sure yesterday's session is
+  // distilled into memory BEFORE we build the prompt, so the recap the tutor is
+  // about to give includes it (lazy fallback when the 45-min distill job hasn't
+  // drained — bounded to ONE inline Haiku call).
+  const isSessionOpen = !existingSessionId
+  if (isSessionOpen) {
+    await distillPreviousSessionIfNeeded(user.id, courseId, sessionId)
+      .catch(e => console.error('[tutor] lazy distill failed (continuing)', e))
+  }
   const savedUserContent = attachments.length > 0
     ? `[att:${attachments.map(a => a.name).join('|')}]\n${message}`
     : message
@@ -216,9 +228,15 @@ export async function POST(request: Request) {
 
   const topics = (courseTopics ?? []) as { topic_id: string; name: string }[]
 
+  // C5: skip retrieval entirely on trivial conversational turns — "thanks",
+  // "go on", "yes" carry no retrieval intent, but each previously cost a
+  // billable embedding call + ~4k tokens of injected chunks.
+  const TRIVIAL_TURN_RE = /^(yes|yeah|yep|no|nope|nah|ok|okay|sure|thanks|thank you|got it|go on|continue|next|cool|nice|great|hm+|wait)\b[\s!.?]*$/i
+  const skipRag = message.trim().length < 4 || TRIVIAL_TURN_RE.test(message.trim())
+
   const [systemPrompt, history] = await Promise.all([
     (async () => {
-      const ragChunks = await retrieveChunks(message, courseId, user.id, 5).catch(() => [])
+      const ragChunks = skipRag ? [] : await retrieveChunks(message, courseId, user.id, 5).catch(() => [])
       const ragContext = ragChunks.length > 0
         ? ragChunks.map(c => c.content).join('\n\n---\n\n')
         : undefined
@@ -229,6 +247,7 @@ export async function POST(request: Request) {
         professorId: courseRow?.professor_id ?? undefined,
         ragContext,
         topics,
+        isSessionOpen,
       })
     })(),
     getOwnedSessionMessages(sessionId, user.id),
@@ -237,7 +256,13 @@ export async function POST(request: Request) {
   const client = new Anthropic({ apiKey })
   // In essay mode, historyCutoff is set when the user switches assistance levels —
   // messages before the cutoff are excluded so prior-mode behavior doesn't bleed over.
-  const priorMessages = history.slice(historyCutoff, -1)
+  const fullPrior = history.slice(historyCutoff, -1)
+
+  // M6: long sessions no longer re-send the whole transcript every turn — the
+  // older prefix is compacted into a cached brief; the recent window is verbatim.
+  const { summaryBlock: historySummary, messages: priorMessages } = await compactHistory(
+    user.id, sessionId, fullPrior as { role: string; content: string }[], apiKey,
+  )
 
   // Inject essay content as context prefix when in essay mode
   const effectiveMessage = essayContent
@@ -434,12 +459,24 @@ export async function POST(request: Request) {
           const streamParams: any = {
             model: deepThink ? 'claude-opus-4-8' : 'claude-sonnet-4-6',
             max_tokens: deepThink ? 16000 : 4096,
-            // System as two blocks: the static prefix is cached (identical across all
-            // turns/sessions/courses), the dynamic suffix (course, mode, RAG, profile)
-            // is not. This is the system-prompt half of prompt caching.
+            // System blocks: cached static prefix (identical for everyone), then —
+            // when retrieval ran — the RAG excerpts as their OWN cached block (C1:
+            // byte-identical across the up-to-5 tool-loop iterations of a turn and
+            // across follow-up turns on the same topic, so the largest repeated
+            // payload becomes cache reads), then the uncached dynamic suffix
+            // (course, mode, memory, profile + the compacted-history brief).
+            // Breakpoints: tools + static + rag + last-user-message = 4 (the max).
             system: [
               { type: 'text', text: systemPrompt.static, cache_control: { type: 'ephemeral' as const } },
-              { type: 'text', text: systemPrompt.dynamic },
+              ...(systemPrompt.rag
+                ? [{ type: 'text', text: systemPrompt.rag, cache_control: { type: 'ephemeral' as const } }]
+                : []),
+              {
+                type: 'text',
+                text: historySummary
+                  ? `${systemPrompt.dynamic}\n\n## Conversation so far (compacted)\nEarlier turns of THIS session, compressed — treat as accurate context:\n${historySummary}`
+                  : systemPrompt.dynamic,
+              },
             ],
             tools,
             messages,
@@ -721,10 +758,17 @@ export async function POST(request: Request) {
             }
           }
 
-          const isFirstExchange = priorMessages.length === 0
+          // fullPrior (not the compacted window) — compaction never empties a
+          // session that has history, but the guard must mean "truly first".
+          const isFirstExchange = fullPrior.length === 0
           if (isFirstExchange) {
             autoNameSession(sessionId, user.id, `Student: ${message}\nTutor: ${fullText}`, apiKey)
           }
+
+          // M1: (re-)arm the memory distiller for ~45 min after this (latest)
+          // message, then drain any OTHER due jobs post-response.
+          await armDistillJob(user.id, sessionId).catch(e => console.error('[tutor] armDistillJob failed', e))
+          kickJobs()
         }
 
         controller.close()
