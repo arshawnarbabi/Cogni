@@ -1,5 +1,6 @@
 import { createClient } from '@/lib/supabase/server'
 import { getUserKey, setUserKey, deleteUserKey } from '@/lib/user-keys'
+import { markKeyStatus } from '@/lib/ai/call'
 import { NextResponse } from 'next/server'
 
 export async function GET(request: Request) {
@@ -28,12 +29,30 @@ export async function POST(request: Request) {
   if (!key || !value?.trim()) return NextResponse.json({ error: 'Missing key or value' }, { status: 400 })
   if (key !== 'openai_key') return NextResponse.json({ error: 'Unsupported key' }, { status: 400 })
 
+  // Validate against OpenAI BEFORE storing (R5): models.list is free and 401s
+  // on a bad key — a dead key stored silently breaks search/embeddings later.
+  try {
+    const { default: OpenAI } = await import('openai')
+    const probe = new OpenAI({ apiKey: value.trim() })
+    await probe.models.list()
+  } catch (e) {
+    const status = (e as { status?: number })?.status
+    if (status === 401 || status === 403) {
+      return NextResponse.json({ error: 'That OpenAI key was rejected by OpenAI. Check that you copied the full key (it should start with sk-).' }, { status: 400 })
+    }
+    console.warn('[user/keys] validation probe inconclusive, storing anyway', e)
+  }
+
   try {
     await setUserKey(user.id, key, value.trim())
   } catch (e) {
     console.error('[user/keys] setUserKey failed:', e)
     return NextResponse.json({ error: 'Failed to store key.' }, { status: 500 })
   }
+
+  // A freshly-validated key is healthy — clear any stale 'invalid' banner.
+  markKeyStatus(user.id, 'openai', 'ok')
+
   return NextResponse.json({ ok: true })
 }
 

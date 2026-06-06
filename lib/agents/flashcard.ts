@@ -4,6 +4,7 @@ import { getUserApiKey } from '@/lib/vault'
 import { newCardDefaults } from '@/lib/fsrs'
 import { appendToLog } from '@/lib/wiki'
 import { dateKeyInTimeZone, addDaysToDateKey } from '@/lib/time'
+import { withRetry } from '@/lib/ai/call'
 
 type GeneratedCard = { front: string; back: string; hint?: string }
 
@@ -147,7 +148,10 @@ export async function runFlashcardAgent(
   }
 
   const client = new Anthropic({ apiKey })
-  const cards = await generateCards(client, topicName, courseName, context)
+  const cards = await withRetry(
+    () => generateCards(client, topicName, courseName, context),
+    { label: 'flashcard.generate', keyHealth: { userId, provider: 'anthropic' } },
+  ).catch(() => [] as GeneratedCard[])
 
   if (cards.length === 0) return { generated: 0, error: 'No cards generated' }
 

@@ -5,6 +5,7 @@ import { readWikiFile, writeWikiFile, appendToLog } from '@/lib/wiki'
 import { retrieveChunks, processEmbeddings } from '@/lib/rag'
 import { requireOwnedCourse } from '@/lib/authz'
 import { extractText, buildVisualBlock, extractContentFromVision } from '@/lib/extract-text'
+import { withRetry } from '@/lib/ai/call'
 
 // Character budgets for syllabus prompts. Previously 12k/10k chars, which silently
 // dropped the tail of long syllabi — and syllabi are chronological, so the tail is
@@ -362,7 +363,12 @@ export async function runProfiler(
   let extractedAssignments: ExtractedAssignment[] = []
 
   try {
-    const result = await extractTopicsAndExams(client, courseName, syllabusText, existingTopicNames)
+    // withRetry (R1): a transient 529/overload previously made the profiler
+    // "succeed" with zero topics; also records key health on auth failures (R5).
+    const result = await withRetry(
+      () => extractTopicsAndExams(client, courseName, syllabusText, existingTopicNames),
+      { label: 'profiler.extract', keyHealth: { userId, provider: 'anthropic' } },
+    )
     extractedTopics = result.topics
     extractedExams = result.exams
     extractedAssignments = result.assignments
@@ -558,12 +564,9 @@ export async function runProfiler(
 
     let professorProfile = ''
     try {
-      professorProfile = await extractProfessorProfile(
-        client,
-        professorName,
-        courseName,
-        enrichedSyllabus,
-        existing,
+      professorProfile = await withRetry(
+        () => extractProfessorProfile(client, professorName, courseName, enrichedSyllabus, existing),
+        { label: 'profiler.professor', keyHealth: { userId, provider: 'anthropic' } },
       )
     } catch (e) {
       console.error(`${tag} extractProfessorProfile failed`, e)

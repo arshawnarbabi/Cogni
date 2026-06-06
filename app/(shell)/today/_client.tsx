@@ -307,6 +307,7 @@ export function TodayClient({
   pendingCount,
   streak,
   hasApiKey,
+  keyHealth,
   missingSyllabus,
   activeNudge: initialNudge,
   courseIconMap,
@@ -317,6 +318,7 @@ export function TodayClient({
   pendingCount: number
   streak: number
   hasApiKey: boolean
+  keyHealth?: { anthropic: string | null; openai: string | null }
   missingSyllabus: { course_id: string; name: string }[]
   activeNudge: ActiveNudge | null
   courseIconMap: CourseIconMap
@@ -398,6 +400,48 @@ export function TodayClient({
 
       {/* AI Insight */}
       {insightTask && <InsightCard text={insightTask.text} />}
+
+      {/* System state: a saved key is BROKEN (rejected by the provider / out of
+          credits). Detected by the AI-call circuit breaker (R5) — without this, a
+          dead key looks like a mysteriously broken app. */}
+      {hasApiKey && keyHealth?.anthropic && (
+        <div className="flex items-center gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 dark:border-red-900/50 dark:bg-red-950/30">
+          <Key size={18} className="shrink-0 text-red-500" weight="fill" />
+          <div className="flex flex-1 flex-col min-w-0">
+            <span className="text-sm font-semibold text-red-800 dark:text-red-300">
+              {keyHealth.anthropic === 'no_credits' ? 'Your Anthropic key is out of credits' : 'Your Anthropic key was rejected'}
+            </span>
+            <span className="text-xs text-red-600/80 dark:text-red-400/80">
+              {keyHealth.anthropic === 'no_credits'
+                ? 'The tutor and AI features are paused until you add credits to your Anthropic account.'
+                : 'It may have been revoked. Re-enter a valid key in Settings to restore AI features.'}
+            </span>
+          </div>
+          <Link
+            href="/settings"
+            className="shrink-0 rounded-lg bg-red-100 px-3 py-1.5 text-xs font-semibold text-red-700 hover:bg-red-200 transition-colors dark:bg-red-900/40 dark:text-red-300"
+          >
+            Fix
+          </Link>
+        </div>
+      )}
+      {keyHealth?.openai && (
+        <div className="flex items-center gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 dark:border-amber-900/50 dark:bg-amber-950/30">
+          <Key size={18} className="shrink-0 text-amber-500" weight="fill" />
+          <div className="flex flex-1 flex-col min-w-0">
+            <span className="text-sm font-semibold text-amber-800 dark:text-amber-300">
+              {keyHealth.openai === 'no_credits' ? 'Your OpenAI key is out of credits' : 'Your OpenAI key was rejected'}
+            </span>
+            <span className="text-xs text-amber-600/80 dark:text-amber-400/80">Semantic search over your materials is degraded until the key is fixed in Settings.</span>
+          </div>
+          <Link
+            href="/settings"
+            className="shrink-0 rounded-lg bg-amber-100 px-3 py-1.5 text-xs font-semibold text-amber-700 hover:bg-amber-200 transition-colors dark:bg-amber-900/40 dark:text-amber-300"
+          >
+            Fix
+          </Link>
+        </div>
+      )}
 
       {/* System state: API key missing */}
       {!hasApiKey && (

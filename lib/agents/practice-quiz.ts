@@ -2,6 +2,7 @@ import { createServiceClient } from '@/lib/supabase/server'
 import { getUserApiKey } from '@/lib/vault'
 import { readWikiFile } from '@/lib/wiki'
 import { applyMasteryEvidence, resolveTopicByName } from '@/lib/mastery'
+import { withRetry } from '@/lib/ai/call'
 import Anthropic from '@anthropic-ai/sdk'
 
 export type QuizFormat = 'mc' | 'short_answer' | 'mixed'
@@ -91,7 +92,7 @@ export async function generatePracticeQuiz(
       : 'Difficulty: MEDIUM — standard exam-style questions, moderate complexity.'
 
   const client = new Anthropic({ apiKey })
-  const response = await client.messages.create({
+  const response = await withRetry(() => client.messages.create({
     model: 'claude-haiku-4-5-20251001',
     max_tokens: 4096,
     messages: [
@@ -117,7 +118,7 @@ Schema for each question:
 }`,
       },
     ],
-  })
+  }), { label: 'quiz.generate', keyHealth: { userId, provider: 'anthropic' } })
 
   const raw = response.content[0].type === 'text' ? response.content[0].text.trim() : '[]'
   const stripped = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')
@@ -190,7 +191,7 @@ export async function generateSimulatedExam(
     .join('\n')
 
   const client = new Anthropic({ apiKey })
-  const response = await client.messages.create({
+  const response = await withRetry(() => client.messages.create({
     model: 'claude-sonnet-4-6',
     max_tokens: 8192,
     messages: [
@@ -223,7 +224,7 @@ Schema for each question:
 }`,
       },
     ],
-  })
+  }), { label: 'quiz.simulated-exam', keyHealth: { userId, provider: 'anthropic' } })
 
   const raw = response.content[0].type === 'text' ? response.content[0].text.trim() : '[]'
   const stripped = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')
@@ -263,7 +264,7 @@ export async function gradeAndRecord(
       if (apiKey && ua.trim()) {
         const client = new Anthropic({ apiKey })
         try {
-          const msg = await client.messages.create({
+          const msg = await withRetry(() => client.messages.create({
             model: 'claude-haiku-4-5-20251001',
             max_tokens: 200,
             messages: [{
@@ -274,7 +275,7 @@ Model answer: ${q.answer}
 Student answer: ${ua}
 Return JSON only: {"score": 0.0-1.0, "correct": true/false, "feedback": "one sentence"}`,
             }],
-          })
+          }), { label: 'quiz.grade', retries: 2, keyHealth: { userId, provider: 'anthropic' } })
           const raw = msg.content[0].type === 'text' ? msg.content[0].text : '{}'
           const g = JSON.parse(raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, ''))
           results.push({ question: q, userAnswer: ua, correct: !!g.correct, score: g.score ?? 0, feedback: g.feedback })

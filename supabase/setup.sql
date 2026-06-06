@@ -1498,6 +1498,14 @@ alter table public.mcp_tokens add column if not exists expires_at timestamptz;
 -- the built-in BYOK-API tutor.
 alter table public.users add column if not exists prefer_own_claude boolean not null default false;
 
+-- BYOK key health (R5): 'invalid' | 'no_credits' | NULL (healthy/unknown).
+-- Written by the lib/ai/call.ts circuit breaker on provider auth/credit
+-- failures, cleared on success and on key (re-)save; drives the key banner.
+alter table public.users add column if not exists anthropic_key_status text
+  check (anthropic_key_status in ('invalid', 'no_credits') or anthropic_key_status is null);
+alter table public.users add column if not exists openai_key_status text
+  check (openai_key_status in ('invalid', 'no_credits') or openai_key_status is null);
+
 -- Per-invocation audit of MCP tool calls (F4): the MCP surface previously logged
 -- nothing, so abuse or breakage was invisible. Service-role only (RLS, no policies).
 create table if not exists public.mcp_tool_calls (

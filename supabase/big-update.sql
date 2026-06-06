@@ -156,6 +156,15 @@ grant execute on function public.review_card_atomic(
   uuid, uuid, numeric, numeric, integer, integer, text, timestamptz, date, numeric, numeric, smallint, uuid
 ) to service_role;
 
+-- ── R5: BYOK key health ───────────────────────────────────────────────────────
+-- 'invalid' | 'no_credits' | NULL (healthy/unknown). Written by the withRetry
+-- circuit breaker on provider auth/credit failures, cleared on success and on
+-- key (re-)save. Surfaced as a "your key is broken" banner.
+alter table public.users add column if not exists anthropic_key_status text
+  check (anthropic_key_status in ('invalid', 'no_credits') or anthropic_key_status is null);
+alter table public.users add column if not exists openai_key_status text
+  check (openai_key_status in ('invalid', 'no_credits') or openai_key_status is null);
+
 -- ── F4: MCP guard layer — token expiry + tool-call audit ─────────────────────
 alter table public.mcp_tokens add column if not exists expires_at timestamptz;
 

@@ -1,3 +1,4 @@
+import * as Sentry from '@sentry/nextjs'
 import { createServiceClient } from '@/lib/supabase/server'
 
 export function isValidCronRequest(request: Request): boolean {
@@ -37,6 +38,9 @@ export async function runForAllUsers(
         if (r.status === 'rejected') {
           failed++
           console.error('[cron] task failed for a user', r.reason)
+          // Visible in prod (R14): a spike of per-user cron failures was
+          // previously console-only, i.e. invisible.
+          Sentry.captureException(r.reason, { tags: { surface: 'cron' } })
         }
       }
     }

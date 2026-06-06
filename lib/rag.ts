@@ -1,5 +1,6 @@
 import { createServiceClient } from '@/lib/supabase/server'
 import { getUserKey } from '@/lib/user-keys'
+import { withRetry } from '@/lib/ai/call'
 
 // ~800 tokens at 4 chars/token
 const CHUNK_SIZE = 3200
@@ -80,10 +81,13 @@ export async function processEmbeddings(
     const batchSize = 100
     for (let i = 0; i < chunks.length; i += batchSize) {
       const batch = chunks.slice(i, i + batchSize)
-      const response = await openai.embeddings.create({
-        model: 'text-embedding-3-small',
-        input: batch.map(c => c.content),
-      })
+      const response = await withRetry(
+        () => openai.embeddings.create({
+          model: 'text-embedding-3-small',
+          input: batch.map(c => c.content),
+        }),
+        { label: 'rag.embed', keyHealth: { userId, provider: 'openai' } },
+      )
 
       await service.from('material_embeddings').insert(
         batch.map((chunk, j) => ({
@@ -140,10 +144,13 @@ export async function retrieveChunksDetailed(
       const { default: OpenAI } = await import('openai')
       const openai = new OpenAI({ apiKey: openaiKey })
 
-      const embeddingResponse = await openai.embeddings.create({
-        model: 'text-embedding-3-small',
-        input: query.slice(0, 2000),
-      })
+      const embeddingResponse = await withRetry(
+        () => openai.embeddings.create({
+          model: 'text-embedding-3-small',
+          input: query.slice(0, 2000),
+        }),
+        { label: 'rag.query-embed', retries: 2, keyHealth: { userId, provider: 'openai' } },
+      )
       const queryEmbedding = embeddingResponse.data[0].embedding
 
       const { data, error } = await service.rpc('match_material_chunks', {

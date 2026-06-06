@@ -1,5 +1,7 @@
 import { createClient, createServiceClient } from '@/lib/supabase/server'
 import { deleteUserApiKey } from '@/lib/vault'
+import { markKeyStatus } from '@/lib/ai/call'
+import Anthropic from '@anthropic-ai/sdk'
 import { NextResponse } from 'next/server'
 
 export async function DELETE() {
@@ -29,6 +31,22 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
+  // Validate the key against the provider BEFORE storing (R5): models.list is
+  // free and fails 401 on a bad/revoked key. Previously a dead key was stored
+  // silently and the user discovered it as a mysteriously broken app.
+  try {
+    const probe = new Anthropic({ apiKey: key })
+    await probe.models.list({ limit: 1 })
+  } catch (e) {
+    const status = (e as { status?: number })?.status
+    if (status === 401 || status === 403) {
+      return NextResponse.json({ error: 'That Anthropic key was rejected by Anthropic. Check that you copied the full key (it should start with sk-ant-).' }, { status: 400 })
+    }
+    // Provider hiccup (overloaded/network): don't block the save — the
+    // circuit breaker will flag the key later if it's genuinely broken.
+    console.warn('[api-key] validation probe inconclusive, storing anyway', e)
+  }
+
   const service = createServiceClient()
   const { error } = await service.rpc('store_user_api_key', {
     p_user_id: user.id,
@@ -48,6 +66,9 @@ export async function POST(request: Request) {
     console.error('[api-key] store_user_api_key reported success but key did not persist')
     return NextResponse.json({ error: 'Failed to store key.' }, { status: 500 })
   }
+
+  // A freshly-validated key is healthy — clear any stale 'invalid' banner.
+  markKeyStatus(user.id, 'anthropic', 'ok')
 
   return NextResponse.json({ ok: true })
 }

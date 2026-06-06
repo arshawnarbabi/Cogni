@@ -18,6 +18,7 @@ import { readWikiFile, writeWikiFile } from '@/lib/wiki'
 import { newCardDefaults } from '@/lib/fsrs'
 import { retrieveChunks } from '@/lib/rag'
 import { applyMasteryEvidence, resolveTopicByName, LEARNING_RATES } from '@/lib/mastery'
+import { keyFailureKind, markKeyStatus } from '@/lib/ai/call'
 import Anthropic from '@anthropic-ai/sdk'
 import { NextResponse } from 'next/server'
 
@@ -724,6 +725,10 @@ export async function POST(request: Request) {
         closed = true
       } catch (err) {
         console.error('[tutor] stream error', err)
+        // R5: a rejected/out-of-credit key on the highest-volume AI path marks
+        // key health so the dashboard can say "your key is broken".
+        const keyFailure = keyFailureKind(err)
+        if (keyFailure) markKeyStatus(user.id, 'anthropic', keyFailure)
         // B7: generation died before an assistant turn was saved → roll back the
         // user message (no quota burn, no unanswered turn in history).
         if (!assistantSaved && userMessageId) {

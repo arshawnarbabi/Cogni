@@ -9,6 +9,7 @@ import { processEmbeddings } from '@/lib/rag'
 import { requireOwnedCourse } from '@/lib/authz'
 import { consumeAiQuota } from '@/lib/rate-limit'
 import { extractText, buildVisualBlock, extractContentFromVision } from '@/lib/extract-text'
+import { withRetry } from '@/lib/ai/call'
 
 type ClassifyResult = {
   courseId: string | null
@@ -132,11 +133,14 @@ export async function classifyMaterial(
         type: 'text',
         text: CLASSIFY_PROMPT(courseList, filename, context, ''),
       }
-      const visionMessage = await client.messages.create({
-        model: 'claude-haiku-4-5-20251001',
-        max_tokens: 512,
-        messages: [{ role: 'user', content: [visualBlock, textBlock] }],
-      })
+      const visionMessage = await withRetry(
+        () => client.messages.create({
+          model: 'claude-haiku-4-5-20251001',
+          max_tokens: 512,
+          messages: [{ role: 'user', content: [visualBlock, textBlock] }],
+        }),
+        { label: 'inbox.classify.vision', keyHealth: { userId, provider: 'anthropic' } },
+      )
       rawResponse = visionMessage.content[0].type === 'text' ? visionMessage.content[0].text : ''
     } catch (e) {
       console.error('[inbox] vision classification failed', e)
@@ -146,11 +150,14 @@ export async function classifyMaterial(
       return { courseId: null, tier: 4, status: 'unreadable', isHomework: false, dueDate: null }
     }
   } else {
-    const message = await client.messages.create({
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: 512,
-      messages: [{ role: 'user', content: CLASSIFY_PROMPT(courseList, filename, context, content) }],
-    })
+    const message = await withRetry(
+      () => client.messages.create({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 512,
+        messages: [{ role: 'user', content: CLASSIFY_PROMPT(courseList, filename, context, content) }],
+      }),
+      { label: 'inbox.classify', keyHealth: { userId, provider: 'anthropic' } },
+    )
     rawResponse = message.content[0].type === 'text' ? message.content[0].text : ''
   }
 

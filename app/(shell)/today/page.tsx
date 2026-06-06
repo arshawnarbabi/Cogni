@@ -36,7 +36,7 @@ export default async function TodayPage() {
     apiKey,
     { data: courses },
   ] = await Promise.all([
-    service.from('users').select('display_name, study_streak, last_study_date, timezone').eq('user_id', user.id).maybeSingle(),
+    service.from('users').select('display_name, study_streak, last_study_date, timezone, anthropic_key_status, openai_key_status').eq('user_id', user.id).maybeSingle(),
     service.from('study_plan').select('tasks').eq('user_id', user.id).eq('plan_date', dateKeyInTimeZone(new Date(), 'UTC')).maybeSingle(),
     service.from('inbox_items').select('inbox_item_id').eq('user_id', user.id).in('classification_status', ['pending', 'unassigned']),
     getUserApiKey(user.id).catch(() => null),
@@ -175,6 +175,7 @@ export default async function TodayPage() {
       pendingCount={inboxPending?.length ?? 0}
       streak={userRow?.study_streak ?? 0}
       hasApiKey={!!apiKey}
+      keyHealth={{ anthropic: userRow?.anthropic_key_status ?? null, openai: userRow?.openai_key_status ?? null }}
       missingSyllabus={missingSyllabus}
       activeNudge={activeNudge}
       courseIconMap={courseIconMap}

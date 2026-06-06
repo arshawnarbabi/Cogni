@@ -1,3 +1,4 @@
+import * as Sentry from '@sentry/nextjs'
 import { NextResponse } from 'next/server'
 
 // Stable, client-safe API error responses.
@@ -17,6 +18,13 @@ export function apiError(
   if (log) {
     // Server-side only — the real error never crosses to the client.
     console.error(`[${log.where}] ${code}`, log.cause ?? '')
+    // 5xx are OUR failures — route them to Sentry so they're visible in prod
+    // (previously console.error only, i.e. invisible until a user complained).
+    if (status >= 500) {
+      Sentry.captureException(log.cause instanceof Error ? log.cause : new Error(`[${log.where}] ${code}`), {
+        tags: { where: log.where },
+      })
+    }
   }
   return NextResponse.json({ error: code }, { status })
 }
