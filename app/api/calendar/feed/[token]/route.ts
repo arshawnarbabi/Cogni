@@ -16,6 +16,25 @@ function icsEscape(s: string): string {
   return s.replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n')
 }
 
+// RFC 5545 §3.1: content lines longer than 75 octets MUST be folded
+// (continuation lines start with a space). Fold on OCTET boundaries without
+// splitting a multi-byte UTF-8 sequence — emoji summaries exceed the limit.
+function foldLine(line: string): string {
+  const bytes = Buffer.from(line, 'utf8')
+  if (bytes.length <= 75) return line
+  const parts: Buffer[] = []
+  let start = 0
+  let limit = 75 // first line: 75 octets; continuations: space + 74
+  while (start < bytes.length) {
+    let end = Math.min(start + limit, bytes.length)
+    while (end > start && end < bytes.length && (bytes[end] & 0xc0) === 0x80) end--
+    parts.push(bytes.subarray(start, end))
+    start = end
+    limit = 74
+  }
+  return parts.map((b, i) => (i === 0 ? '' : ' ') + b.toString('utf8')).join('\r\n')
+}
+
 function dateValue(dateKey: string): string {
   return dateKey.replace(/-/g, '')
 }
@@ -100,7 +119,7 @@ export async function GET(
 
   lines.push('END:VCALENDAR')
 
-  return new Response(lines.join('\r\n') + '\r\n', {
+  return new Response(lines.map(foldLine).join('\r\n') + '\r\n', {
     headers: {
       'Content-Type': 'text/calendar; charset=utf-8',
       'Content-Disposition': 'inline; filename="cogni.ics"',

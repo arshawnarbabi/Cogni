@@ -5,6 +5,7 @@ import { newCardDefaults } from '@/lib/fsrs'
 import { appendToLog } from '@/lib/wiki'
 import { dateKeyInTimeZone, addDaysToDateKey } from '@/lib/time'
 import { withRetry } from '@/lib/ai/call'
+import { recordUsage } from '@/lib/usage'
 
 type GeneratedCard = { front: string; back: string; hint?: string }
 
@@ -50,6 +51,7 @@ export async function assignNewCardDueDates(
 
 async function generateCards(
   client: Anthropic,
+  userId: string,
   topicName: string,
   courseName: string,
   context: string
@@ -73,6 +75,8 @@ Respond with exactly: {"cards":[{"front":"...","back":"...","hint":"..."},...]}`
       },
     ],
   })
+
+  recordUsage(userId, 'flashcards', 'claude-haiku-4-5-20251001', message.usage)
 
   const raw = message.content[0].type === 'text' ? message.content[0].text : ''
   const cleaned = raw
@@ -180,7 +184,7 @@ export async function runFlashcardAgent(
 
   const client = new Anthropic({ apiKey })
   const cards = await withRetry(
-    () => generateCards(client, topicName, courseName, context),
+    () => generateCards(client, userId, topicName, courseName, context),
     { label: 'flashcard.generate', keyHealth: { userId, provider: 'anthropic' } },
   ).catch(() => [] as GeneratedCard[])
 

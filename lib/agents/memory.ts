@@ -1,8 +1,10 @@
 import Anthropic from '@anthropic-ai/sdk'
+import { after } from 'next/server'
 import { createServiceClient } from '@/lib/supabase/server'
 import { getUserApiKey } from '@/lib/vault'
 import { withRetry } from '@/lib/ai/call'
 import { resolveTopicByName, applyMasteryEvidence, LEARNING_RATES, type EvidenceInput } from '@/lib/mastery'
+import { recordUsage } from '@/lib/usage'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Persistent tutor memory (M1 + M2 + M9).
@@ -195,6 +197,7 @@ memories rules: durable facts only, the kind worth knowing NEXT month — a recu
 Rules: be specific and factual — only what the transcript supports. Empty arrays are fine. No advice, no filler.`,
     }],
   }), { label: 'memory.distill', keyHealth: { userId, provider: 'anthropic' } })
+  recordUsage(userId, 'memory', 'claude-haiku-4-5-20251001', response.usage)
 
   const raw = response.content[0]?.type === 'text' ? response.content[0].text : ''
   const distilled = parseDistilled(raw)
@@ -362,38 +365,49 @@ export async function compactHistory(
     return { summaryBlock: cachedSummary, messages: [...gap, ...kept] }
   }
 
-  // (Re-)summarize the evicted prefix: previous summary + newly evicted turns.
-  try {
-    const client = new Anthropic({ apiKey })
-    const newPart = renderTranscript(evicted.slice(cachedSummary ? cachedUpto : 0))
-    const response = await withRetry(() => client.messages.create({
-      model: 'claude-haiku-4-5-20251001',
-      max_tokens: 700,
-      messages: [{
-        role: 'user',
-        content: `Compress this tutoring-session history into a compact "conversation so far" brief (max ~250 words). Preserve: concepts covered and conclusions reached, what the student got right/wrong, unresolved questions, and any commitments ("we'll do a quiz next"). Drop pleasantries and redundancy.
+  // (Re-)summarize the evicted prefix in the BACKGROUND — a synchronous Haiku
+  // call here gated the student's FIRST STREAMED TOKEN behind seconds of
+  // summarization. Serve the verbatim transcript now (correct, just costlier);
+  // the cached brief this writes shrinks the NEXT turn. after() keeps the
+  // lambda alive past the response on Vercel (same pattern as kickJobs).
+  const summarize = async () => {
+    try {
+      const client = new Anthropic({ apiKey })
+      const newPart = renderTranscript(evicted.slice(cachedSummary ? cachedUpto : 0))
+      const response = await withRetry(() => client.messages.create({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 700,
+        messages: [{
+          role: 'user',
+          content: `Compress this tutoring-session history into a compact "conversation so far" brief (max ~250 words). Preserve: concepts covered and conclusions reached, what the student got right/wrong, unresolved questions, and any commitments ("we'll do a quiz next"). Drop pleasantries and redundancy.
 
 ${cachedSummary ? `EXISTING BRIEF (covers the earlier part):\n${cachedSummary}\n\nNEW TURNS TO FOLD IN:` : 'TRANSCRIPT:'}
 ${newPart}
 
 Return ONLY the updated brief text.`,
-      }],
-    }), { label: 'memory.compact', keyHealth: { userId, provider: 'anthropic' } })
+        }],
+      }), { label: 'memory.compact', keyHealth: { userId, provider: 'anthropic' } })
+      recordUsage(userId, 'memory', 'claude-haiku-4-5-20251001', response.usage)
 
-    const summary = response.content[0]?.type === 'text' ? response.content[0].text.trim() : ''
-    if (summary) {
-      await service.from('session_log').update({
-        history_summary: summary.slice(0, 4000),
-        history_summary_upto: evictCount,
-        updated_at: new Date().toISOString(),
-      }).eq('session_id', sessionId).eq('user_id', userId)
-      return { summaryBlock: summary.slice(0, 4000), messages: kept }
+      const summary = response.content[0]?.type === 'text' ? response.content[0].text.trim() : ''
+      if (summary) {
+        await service.from('session_log').update({
+          history_summary: summary.slice(0, 4000),
+          history_summary_upto: evictCount,
+          updated_at: new Date().toISOString(),
+        }).eq('session_id', sessionId).eq('user_id', userId)
+      }
+    } catch (e) {
+      console.error('[memory] background history compaction failed', e)
     }
-  } catch (e) {
-    console.error('[memory] history compaction failed (sending full history)', e)
+  }
+  try {
+    after(summarize)
+  } catch {
+    void summarize()
   }
 
-  // Compaction failed — fall back to the full transcript (correct, just costlier).
+  // This turn ships the full transcript verbatim; the brief lands for next turn.
   return { summaryBlock: '', messages: priorMessages }
 }
 

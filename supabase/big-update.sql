@@ -34,8 +34,12 @@ delete from public.assignments a using public.assignments b
     and lower(coalesce(a.name, '')) = lower(coalesce(b.name, '')) and a.due_date = b.due_date
     and a.ctid < b.ctid;
 
+-- NULLS NOT DISTINCT (PG15+): name is nullable, and with default semantics
+-- null-name rows never conflict — the upsert's ON CONFLICT would silently
+-- no-op as a dedup guard for them.
+drop index if exists assignments_user_course_name_due_uniq;
 create unique index if not exists assignments_user_course_name_due_uniq
-  on public.assignments (user_id, course_id, name, due_date);
+  on public.assignments (user_id, course_id, name, due_date) nulls not distinct;
 
 -- ── F3 + B6: unified mastery model + idempotent reviews ──────────────────────
 -- review_card_atomic now takes evidence (observed level + learning rate, EWMA)
@@ -434,6 +438,13 @@ create index if not exists idx_users_calendar_feed_token on public.users(calenda
 -- which left a material with ZERO embeddings if a batch failed mid-loop —
 -- into an atomic upsert-per-chunk swap.
 alter table public.material_embeddings add column if not exists content_hash text;
+-- Backfill so pre-existing rows hash-match what lib/rag.ts computes (sha256 hex
+-- of the content text) — without this, the first re-embed of every existing
+-- material would re-bill the student's OpenAI key for unchanged chunks.
+create extension if not exists pgcrypto;
+update public.material_embeddings
+  set content_hash = encode(digest(content, 'sha256'), 'hex')
+  where content_hash is null;
 -- Defensive de-dup before the unique index (the old path could not create
 -- duplicates, but a reused DB might have them).
 delete from public.material_embeddings a using public.material_embeddings b

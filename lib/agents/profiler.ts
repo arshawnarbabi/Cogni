@@ -7,6 +7,7 @@ import { requireOwnedCourse } from '@/lib/authz'
 import { extractText, buildVisualBlock, extractContentFromVision } from '@/lib/extract-text'
 import { withRetry } from '@/lib/ai/call'
 import { effectiveMastery } from '@/lib/mastery'
+import { recordUsage } from '@/lib/usage'
 
 // Character budgets for syllabus prompts. Previously 12k/10k chars, which silently
 // dropped the tail of long syllabi — and syllabi are chronological, so the tail is
@@ -41,6 +42,7 @@ type ExtractedPrereq = {
 
 async function extractTopicsAndExams(
   client: Anthropic,
+  userId: string,
   courseName: string,
   syllabusText: string,
   existingTopicNames: string[] = []
@@ -100,6 +102,8 @@ Respond with exactly:
     ],
   })
 
+  recordUsage(userId, 'profiler', 'claude-sonnet-4-6', message.usage)
+
   const raw = message.content[0].type === 'text' ? message.content[0].text : ''
   const cleaned = raw
     .trim()
@@ -152,6 +156,7 @@ Respond with exactly:
 
 async function extractProfessorProfile(
   client: Anthropic,
+  userId: string,
   professorName: string,
   courseName: string,
   syllabusText: string,
@@ -183,6 +188,8 @@ Be specific and factual — only write what the syllabus actually says. Do not i
       },
     ],
   })
+
+  recordUsage(userId, 'profiler', 'claude-sonnet-4-6', message.usage)
 
   return message.content[0].type === 'text' ? message.content[0].text.trim() : ''
 }
@@ -427,17 +434,26 @@ export async function runProfiler(
   const seenAssignmentKeys = new Set<string>()
   const extractedPrereqs: ExtractedPrereq[] = []
   const seenPrereqKeys = new Set<string>()
+  // Every model-emitted weight, INCLUDING for already-tracked topics — the
+  // dedup filter below excludes existing topics from extractedTopics, so the
+  // weight-refresh step must read from here or re-runs never update weights.
+  const latestWeightByName = new Map<string, number>()
+  // Windows each emit syllabus_order starting at 1 — renumber globally in
+  // emission order so a long syllabus doesn't interleave topics from window 2
+  // into window 1's ordering.
+  const orderBase = existingTopicNames.length
   try {
     for (const window of windows) {
       // withRetry (R1): a transient 529/overload previously made the profiler
       // "succeed" with zero topics; also records key health on auth failures (R5).
       const result = await withRetry(
-        () => extractTopicsAndExams(client, courseName, window, namesSoFar),
+        () => extractTopicsAndExams(client, userId, courseName, window, namesSoFar),
         { label: 'profiler.extract', keyHealth: { userId, provider: 'anthropic' } },
       )
       for (const t of result.topics) {
+        latestWeightByName.set(t.name.toLowerCase(), t.professor_weight)
         if (!namesSoFar.some(n => n.toLowerCase() === t.name.toLowerCase())) {
-          extractedTopics.push(t)
+          extractedTopics.push({ ...t, syllabus_order: orderBase + extractedTopics.length + 1 })
           namesSoFar.push(t.name)
         }
       }
@@ -473,11 +489,13 @@ export async function runProfiler(
   const existingNames = new Set(existingTopicNames.map(n => n.toLowerCase()))
   const newTopics = extractedTopics.filter(t => !existingNames.has(t.name.toLowerCase()))
 
-  // Update professor_weight on existing topics that match by name — issue in parallel
+  // Update professor_weight on existing topics that match by name — issue in
+  // parallel. Reads from latestWeightByName (NOT extractedTopics, which by
+  // design excludes existing topics — reading it left weights stale forever).
   const weightUpdates = (existingTopics ?? [])
     .map((existing: { topic_id: string; name: string }) => {
-      const match = extractedTopics.find(t => t.name.toLowerCase() === existing.name.toLowerCase())
-      return match ? { topic_id: existing.topic_id, professor_weight: match.professor_weight } : null
+      const w = latestWeightByName.get(existing.name.toLowerCase())
+      return w !== undefined ? { topic_id: existing.topic_id, professor_weight: w } : null
     })
     .filter(Boolean) as { topic_id: string; professor_weight: number }[]
 
@@ -532,15 +550,30 @@ export async function runProfiler(
     }
   }
 
-  // I5: persist the prerequisite edges (topic names → ids over existing +
-  // freshly-inserted topics). Drives "fix the foundation first" in the tutor
+  // Re-read the authoritative topic set: under the B12 concurrent-run race,
+  // upsert ignoreDuplicates RETURNING omits rows the OTHER run inserted first,
+  // so the snapshot+insertedTopics union can miss freshly-created topics and
+  // silently drop prereq edges / exam topic links.
+  let resolvedTopics = [
+    ...(existingTopics ?? []),
+    ...insertedTopics,
+  ] as { topic_id: string; name: string }[]
+  if (extractedPrereqs.length > 0 || extractedExams.length > 0) {
+    const { data: allCourseTopics } = await service
+      .from('topics')
+      .select('topic_id, name')
+      .eq('course_id', courseId)
+      .eq('user_id', userId)
+    if (allCourseTopics && allCourseTopics.length > 0) {
+      resolvedTopics = allCourseTopics as { topic_id: string; name: string }[]
+    }
+  }
+
+  // I5: persist the prerequisite edges (topic names → ids over the
+  // authoritative set). Drives "fix the foundation first" in the tutor
   // and a scheduler boost for weak prerequisites.
   if (extractedPrereqs.length > 0) {
-    const resolvable = [
-      ...(existingTopics ?? []),
-      ...insertedTopics,
-    ] as { topic_id: string; name: string }[]
-    const byName = new Map(resolvable.map(t => [t.name.toLowerCase(), t.topic_id]))
+    const byName = new Map(resolvedTopics.map(t => [t.name.toLowerCase(), t.topic_id]))
     const edges = extractedPrereqs
       .map(p => ({ topic_id: byName.get(p.topic.toLowerCase()), prereq_topic_id: byName.get(p.requires.toLowerCase()) }))
       .filter((e): e is { topic_id: string; prereq_topic_id: string } => !!e.topic_id && !!e.prereq_topic_id && e.topic_id !== e.prereq_topic_id)
@@ -555,10 +588,7 @@ export async function runProfiler(
 
   // Insert extracted exam dates into the exams table
   if (extractedExams.length > 0) {
-    const allTopics = [
-      ...(existingTopics ?? []),
-      ...insertedTopics,
-    ] as { topic_id: string; name: string }[]
+    const allTopics = resolvedTopics
 
     const today = new Date().toISOString().split('T')[0]
     const futureExams = extractedExams.filter(e => e.date >= today)
@@ -613,8 +643,10 @@ export async function runProfiler(
         .eq('user_id', userId)
 
       const existingKeys = new Set(
-        ((existingAssignmentRows ?? []) as { name: string; due_date: string }[])
-          .map(r => `${r.name.toLowerCase()}|${r.due_date.slice(0, 10)}`)
+        // name is nullable — coalesce like the SQL dedup does so a null-name
+        // row can't throw here.
+        ((existingAssignmentRows ?? []) as { name: string | null; due_date: string }[])
+          .map(r => `${(r.name ?? '').toLowerCase()}|${r.due_date.slice(0, 10)}`)
       )
 
       const assignmentRowsToInsert = futureAssignments
@@ -677,7 +709,7 @@ export async function runProfiler(
     let professorProfile = ''
     try {
       professorProfile = await withRetry(
-        () => extractProfessorProfile(client, professorName, courseName, enrichedSyllabus, existing),
+        () => extractProfessorProfile(client, userId, professorName, courseName, enrichedSyllabus, existing),
         { label: 'profiler.professor', keyHealth: { userId, provider: 'anthropic' } },
       )
     } catch (e) {

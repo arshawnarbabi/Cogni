@@ -208,11 +208,18 @@ export async function POST(request: Request) {
   // First message of a UI-new conversation: make sure yesterday's session is
   // distilled into memory BEFORE we build the prompt, so the recap the tutor is
   // about to give includes it (lazy fallback when the 45-min distill job hasn't
-  // drained — bounded to ONE inline Haiku call).
+  // drained — bounded to ONE inline Haiku call). Time-boxed: it enriches the
+  // recap when fast, but a slow distill must not gate the first token — past
+  // the deadline we proceed with the existing digest while the distill finishes
+  // in the background (its write lands for the next turn).
   const isSessionOpen = !existingSessionId
   if (isSessionOpen) {
-    await distillPreviousSessionIfNeeded(user.id, courseId, sessionId)
+    const distillPromise = distillPreviousSessionIfNeeded(user.id, courseId, sessionId)
       .catch(e => console.error('[tutor] lazy distill failed (continuing)', e))
+    await Promise.race([
+      distillPromise,
+      new Promise(resolve => setTimeout(resolve, 4000)),
+    ])
   }
   const savedUserContent = attachments.length > 0
     ? `[att:${attachments.map(a => a.name).join('|')}]\n${message}`
@@ -265,7 +272,10 @@ export async function POST(request: Request) {
         professorId: courseRow?.professor_id ?? undefined,
         ragContext,
         topics,
-        isSessionOpen,
+        // Recap gate: a truly-empty transcript (getOrCreateSession can reuse a
+        // same-day session that already has turns — a "Welcome back" mid-
+        // conversation reads as a glitch). isSessionOpen still gates the distill.
+        isSessionOpen: fullPrior.length === 0,
       })
     })(),
     // M6: long sessions no longer re-send the whole transcript every turn — the

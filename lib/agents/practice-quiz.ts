@@ -3,6 +3,7 @@ import { getUserApiKey } from '@/lib/vault'
 import { readWikiFile } from '@/lib/wiki'
 import { applyMasteryEvidence, resolveTopicByName, effectiveMastery } from '@/lib/mastery'
 import { withRetry } from '@/lib/ai/call'
+import { recordUsage } from '@/lib/usage'
 import { newCardDefaults } from '@/lib/fsrs'
 import { assignNewCardDueDates } from '@/lib/agents/flashcard'
 import Anthropic from '@anthropic-ai/sdk'
@@ -132,6 +133,7 @@ Schema for each question:
       },
     ],
   }), { label: 'quiz.generate', keyHealth: { userId, provider: 'anthropic' } })
+  recordUsage(userId, 'quiz', 'claude-haiku-4-5-20251001', response.usage)
 
   const raw = response.content[0].type === 'text' ? response.content[0].text.trim() : '[]'
   const stripped = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')
@@ -238,6 +240,7 @@ Schema for each question:
       },
     ],
   }), { label: 'quiz.simulated-exam', keyHealth: { userId, provider: 'anthropic' } })
+  recordUsage(userId, 'quiz', 'claude-sonnet-4-6', response.usage)
 
   const raw = response.content[0].type === 'text' ? response.content[0].text.trim() : '[]'
   const stripped = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')
@@ -291,6 +294,7 @@ Return ONLY a JSON array with exactly ${shortAnswerIdx.length} objects, one per 
 [{"score": 0.0-1.0, "correct": true/false, "feedback": "one sentence"}, ...]`,
         }],
       }), { label: 'quiz.grade-batch', retries: 2, keyHealth: { userId, provider: 'anthropic' } })
+      recordUsage(userId, 'quiz', 'claude-haiku-4-5-20251001', msg.usage)
       const raw = msg.content[0].type === 'text' ? msg.content[0].text : '[]'
       const cleaned = raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')
       const arrMatch = cleaned.match(/\[[\s\S]*\]/)
