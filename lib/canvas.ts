@@ -205,7 +205,13 @@ export function mapCanvasCourseData(
       }
 
       // Future-dated → planner assignment. due_at is UTC ISO8601 or null.
-      if (a.due_at && a.due_at > nowIso) {
+      // Skip work the student already turned in (submitted/graded/pending
+      // review) or was excused from — "upcoming homework" means TO DO, and a
+      // graded-early assignment imported as pending would nag forever.
+      const alreadyHandled =
+        sub?.excused === true ||
+        (sub?.workflow_state != null && ['submitted', 'graded', 'pending_review'].includes(sub.workflow_state))
+      if (a.due_at && a.due_at > nowIso && !alreadyHandled) {
         upcomingAssignments.push({
           external_id: String(a.id),
           name,
