@@ -15,6 +15,7 @@ import { AccountSection } from './_account'
 import { KnowledgeStore } from './_knowledge-store'
 import { ConnectClaude } from './_connect-claude'
 import { MemoryCenter } from './_memory'
+import { CalendarFeed } from './_calendar-feed'
 import { CheckCircle, XCircle } from '@phosphor-icons/react/dist/ssr'
 
 export const dynamic = 'force-dynamic'
@@ -127,6 +128,9 @@ export default async function SettingsPage() {
 
         {/* Calendar */}
         <CalendarSection connected={connected} calendarName={calendarName} />
+
+        {/* ICS calendar feed (S4) */}
+        <CalendarFeed />
 
         {/* Appearance */}
         <section className="flex flex-col gap-4 rounded-xl border border-border bg-card p-5">

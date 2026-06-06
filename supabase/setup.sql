@@ -1662,7 +1662,7 @@ alter table public.session_log add column if not exists history_summary_upto int
 -- MCP-logged study sessions (X3) get their own mode value.
 alter table public.session_log drop constraint if exists session_log_mode_check;
 alter table public.session_log add constraint session_log_mode_check
-  check (mode in ('answer', 'teach', 'focus', 'essay', 'mcp'));
+  check (mode in ('answer', 'teach', 'focus', 'essay', 'mcp', 'homework'));
 
 -- The memory distiller runs as a durable job.
 alter table public.jobs drop constraint if exists jobs_kind_check;
@@ -1715,5 +1715,15 @@ drop policy if exists "topic_prerequisites: own rows only" on public.topic_prere
 create policy "topic_prerequisites: own rows only" on public.topic_prerequisites
   for select using (auth.uid() = user_id);
 create index if not exists idx_topic_prereq_user_course on public.topic_prerequisites(user_id, course_id);
+
+notify pgrst, 'reload schema';
+
+-- ======================================================================
+-- Section 15: ICS calendar feed (S4)
+-- ======================================================================
+-- A signed per-user token for the read-only ICS subscription feed — works with
+-- Apple/Outlook/Google without granting Cogni write access to anything.
+alter table public.users add column if not exists calendar_feed_token uuid;
+create index if not exists idx_users_calendar_feed_token on public.users(calendar_feed_token) where calendar_feed_token is not null;
 
 notify pgrst, 'reload schema';

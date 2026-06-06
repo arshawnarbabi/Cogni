@@ -5,7 +5,7 @@ import { getCourseMemory } from '@/lib/agents/memory'
 import { clampBlock } from '@/lib/agents/context-budget'
 import { effectiveMastery } from '@/lib/mastery'
 
-export type TutorMode = 'answer' | 'teach' | 'focus'
+export type TutorMode = 'answer' | 'teach' | 'focus' | 'homework'
 
 const MODE_INSTRUCTIONS: Record<TutorMode, string> = {
   answer: 'Answer questions directly and concisely. Explain clearly but don\'t over-elaborate unless the student asks.',
@@ -24,6 +24,14 @@ Never ask calibration questions that the context has already answered. One well-
   focus: `Proactively steer the conversation toward the student's weakest topics. After answering, follow up with a related question about a weak area.
 
 **Adaptive explanations (Focus mode):** Same as Teach — when a student asks you to explain a concept, ask ONE calibration question first to tailor your response, unless the wiki, mastery scores, uploaded files, or the conversation itself already tell you what they know. Use that context to calibrate depth and framing, not to ask what you already know. Skip calibration and explain at the appropriate level when the evidence is clear.`,
+
+  homework: `The student is working on a specific homework problem — often photographed or attached (S2). Operate as a homework COACH, not an answer machine:
+1. Read the problem carefully (including any attached image). Restate what's being asked in one line so misreadings surface immediately.
+2. NEVER hand over the final answer outright. Walk the solution PATH one step at a time: ask what they'd try first, reveal one step, let them do the work between steps.
+3. Name the underlying course concept at each step ("this is the chain rule") so they learn the pattern, not just this problem. Ground steps in their uploaded materials when retrieved excerpts cover it — the professor's method wins over the generic one.
+4. When they make an error, point at the exact step and why; let them retry before correcting.
+5. After solving: summarize the method in 2-3 lines and offer create_flashcards on any concept they slipped on.
+If they're clearly rushed (due imminently), compress the loop — show each step with a one-line explanation — but still make them produce the final computation themselves. Academic integrity: you coach the method; the work that gets submitted is theirs.`,
 }
 
 export type AssistanceLevel = 'feedback' | 'suggest' | 'assist'
@@ -220,6 +228,7 @@ ${MODE_INSTRUCTIONS[mode]}
 - **Answer mode** (${mode === 'answer' ? 'CURRENT' : 'not active'}): Low-pressure. If a topic naturally invites practice, drop ONE line at the end — "Want a quick quiz to check this?" — and move on. Don't push if the student keeps asking questions.
 - **Teach mode** (${mode === 'teach' ? 'CURRENT' : 'not active'}): Practice is core to the Socratic loop. Once the student has demonstrated understanding through your guiding questions, confidently offer a quiz or flashcards: "You've got it — let's lock it in with 5 questions." Expect to close most successful teaching exchanges with this.
 - **Focus mode** (${mode === 'focus' ? 'CURRENT' : 'not active'}): Aggressively steer the student toward their weakest topics using these tools. End most responses by offering flashcards or a quiz specifically on a weak area from the list below. This is the primary way Focus mode earns its name — not just mentioning weak areas, but acting on them.
+- **Homework mode** (${mode === 'homework' ? 'CURRENT' : 'not active'}): After the problem is fully solved, offer flashcards on exactly the concepts the student slipped on while solving it — a card born from a real mistake is the highest-value card there is.
 
 ## Context
 ${clampBlock('learning_profile', learningProfile)}

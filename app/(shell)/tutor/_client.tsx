@@ -43,6 +43,7 @@ import {
   FilePdf,
   FileText,
   FileMd,
+  Camera,
 } from '@phosphor-icons/react'
 import { StaggerList, StaggerItem, ease } from '@/components/ui/motion'
 import { resolveIcon, resolveColor } from '@/lib/course-icons'
@@ -55,7 +56,7 @@ import type { Editor } from '@tiptap/react'
 
 type Course = { course_id: string; name: string; icon: string | null; icon_color: string | null; professors: { name: string }[] | { name: string } | null }
 type Session = { session_id: string; course_id: string; name: string | null; mode: string; created_at: string; essay_content?: string | null }
-type Mode = 'answer' | 'teach' | 'focus'
+type Mode = 'answer' | 'teach' | 'focus' | 'homework'
 type InlineCard = { type: 'flashcards' | 'quiz' | 'essay'; count: number; topic: string; data?: object[] }
 type InlineChart = {
   chart_type: 'line' | 'bar' | 'pie'
@@ -104,6 +105,13 @@ const MODES: { value: Mode; label: string; Icon: React.ElementType; tip: string;
     Icon: Crosshair,
     tip: 'Steers every response toward your weakest topics.',
     description: 'Focus mode — every response connects back to your weakest areas.',
+  },
+  {
+    value: 'homework',
+    label: 'Homework',
+    Icon: Camera,
+    tip: 'Snap or attach a problem — get coached through it step by step.',
+    description: 'Homework mode — attach a photo of the problem and get walked through it, one step at a time. No straight answers.',
   },
 ]
 
