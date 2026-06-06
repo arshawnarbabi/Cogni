@@ -179,6 +179,77 @@ create table if not exists public.mcp_tool_calls (
 alter table public.mcp_tool_calls enable row level security;
 create index if not exists idx_mcp_tool_calls_user_created on public.mcp_tool_calls(user_id, created_at);
 
+-- ======================================================================
+-- Section 12: Durable job substrate (F1)
+-- ======================================================================
+-- The ingest pipeline's heavy work (profiling, embedding, flashcard generation)
+-- previously ran inline in request handlers (serverless-timeout risk) or as
+-- fire-and-forget promises (a throw after the HTTP 200 silently lost the work,
+-- with no retry surface). Jobs are durable rows: enqueued in the request,
+-- drained post-response (next/server after()) and swept by the daily cron.
+-- claim_jobs() also reclaims jobs whose lock expired (instance died mid-run)
+-- and fails ones that exhausted their attempts — the stuck-job reaper (R8).
+create table if not exists public.jobs (
+  job_id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references public.users(user_id) on delete cascade,
+  kind text not null check (kind in ('profile', 'embed', 'flashcards')),
+  subject_id uuid,
+  payload jsonb not null default '{}'::jsonb,
+  status text not null default 'queued' check (status in ('queued', 'running', 'done', 'failed')),
+  attempts int not null default 0,
+  max_attempts int not null default 3,
+  run_after timestamptz not null default now(),
+  locked_until timestamptz,
+  last_error text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+alter table public.jobs enable row level security;
+-- No policies: only the server (service role) touches jobs.
+create index if not exists idx_jobs_claimable on public.jobs(status, run_after);
+create index if not exists idx_jobs_user on public.jobs(user_id, created_at);
+
+-- Atomically claim up to p_limit due jobs (FOR UPDATE SKIP LOCKED so concurrent
+-- drains never double-claim). Also: (1) reclaims 'running' jobs whose lock
+-- expired — the worker died mid-job; (2) fails jobs that exhausted attempts.
+create or replace function public.claim_jobs(p_limit int default 5)
+returns setof public.jobs
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  -- Exhausted jobs → failed (visible, not eternally retried).
+  update public.jobs
+  set status = 'failed',
+      last_error = coalesce(last_error, '') || ' [max attempts exhausted]',
+      updated_at = now()
+  where ((status = 'queued' and run_after <= now())
+      or (status = 'running' and locked_until is not null and locked_until < now()))
+    and attempts >= max_attempts;
+
+  return query
+  update public.jobs j
+  set status = 'running',
+      attempts = j.attempts + 1,
+      locked_until = now() + interval '10 minutes',
+      updated_at = now()
+  where j.job_id in (
+    select job_id from public.jobs
+    where ((status = 'queued' and run_after <= now())
+        or (status = 'running' and locked_until is not null and locked_until < now()))
+      and attempts < max_attempts
+    order by created_at
+    limit p_limit
+    for update skip locked
+  )
+  returning j.*;
+end;
+$$;
+
+revoke all on function public.claim_jobs(int) from anon, authenticated, public;
+grant execute on function public.claim_jobs(int) to service_role;
+
 -- PostgREST must see the new unique indexes + function signature before the
 -- app's upsert-on-conflict / RPC calls work.
 notify pgrst, 'reload schema';

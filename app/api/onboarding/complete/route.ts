@@ -1,12 +1,16 @@
 import { createClient, createServiceClient } from '@/lib/supabase/server'
 import { initWiki } from '@/lib/wiki'
-import { runProfiler } from '@/lib/agents/profiler'
 import { requireOwnedProfessor } from '@/lib/authz'
 import { isUserSuspended, consumeAiQuota } from '@/lib/rate-limit'
 import { isValidTimeZone } from '@/lib/time'
 import { serverError } from '@/lib/api-error'
 import { LEGAL_VERSION } from '@/lib/legal'
+import { enqueueJob, kickJobs } from '@/lib/jobs'
 import { NextResponse } from 'next/server'
+
+// Post-response job draining (profiling each syllabus) runs inside this
+// function's budget via after() — give it room beyond the default.
+export const maxDuration = 300
 
 type CourseInput = {
   tempIndex: number
@@ -176,35 +180,27 @@ export async function POST(request: Request) {
     console.error('[onboarding.complete] initWiki failed (non-fatal)', e)
   }
 
-  // Run profiler for each syllabus (extracts topics + updates wiki).
-  // Cap the syllabus-analysis AI work per user/day (abuse + free-tier infra guard,
-  // shared 'profiler' quota with course-create). Consume one unit PER syllabus so
-  // the charge matches course-create's per-run cost; jobs beyond the cap are
-  // skipped and onboarding still succeeds (courses are already created).
-  const allowedJobs: typeof syllabusJobs = []
+  // Profile each syllabus as a durable job (F1): previously awaited inline,
+  // which blocked onboarding completion behind N×(two Sonnet calls) — a
+  // serverless-timeout risk on multi-course signups, with failures lost.
+  // Jobs drain post-response (kickJobs) and the daily cron sweeps stragglers.
+  // Quota consumed at enqueue time (shared 'profiler' bucket with course-create);
+  // syllabi beyond the cap are skipped and onboarding still succeeds.
+  let enqueued = 0
   for (const job of syllabusJobs) {
     if (await consumeAiQuota(user.id, 'profiler')) {
-      allowedJobs.push(job)
+      // embed: tier-1 syllabi skip the inbox pipeline that normally embeds,
+      // so the profiler must embed them for RAG.
+      await enqueueJob(user.id, 'profile', {
+        subjectId: job.materialId,
+        payload: { courseId: job.courseId, courseName: job.courseName, embed: true },
+      })
+      enqueued++
     } else {
       console.warn(`[onboarding] profiler skipped for ${user.id} (${job.fileName}) — daily AI cap reached`)
     }
   }
-
-  if (allowedJobs.length > 0) {
-    // Use allSettled so one failure doesn't prevent the response or other jobs
-    const results = await Promise.allSettled(
-      allowedJobs.map(job =>
-        // embed: tier-1 syllabi are inserted as 'processed' (they skip the inbox
-        // pipeline that normally embeds), so the profiler must embed them for RAG.
-        runProfiler(user.id, job.materialId, job.courseId, job.courseName, { embed: true })
-      )
-    )
-    results.forEach((r, i) => {
-      if (r.status === 'rejected') {
-        console.error(`[onboarding] profiler job ${i} (${allowedJobs[i].fileName}) rejected`, r.reason)
-      }
-    })
-  }
+  if (enqueued > 0) kickJobs(enqueued + 2)
 
   return NextResponse.json({ ok: true })
 }

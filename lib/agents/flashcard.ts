@@ -94,6 +94,37 @@ Respond with exactly: {"cards":[{"front":"...","back":"...","hint":"..."},...]}`
   }
 }
 
+// Generate starter decks for up to 5 topics of a course that have no cards yet.
+// Lives here (not inbox.ts) so the job worker can dispatch it without a circular
+// import; runs as a 'flashcards' job enqueued after tier-1/2 classification.
+export async function autoGenerateFlashcards(userId: string, courseId: string) {
+  const service = createServiceClient()
+
+  const { data: topics } = await service
+    .from('topics')
+    .select('topic_id, name')
+    .eq('course_id', courseId)
+    .eq('user_id', userId)
+
+  if (!topics || topics.length === 0) return
+
+  const topicIds = topics.map((t: { topic_id: string }) => t.topic_id)
+
+  const { data: existingCards } = await service
+    .from('flashcards')
+    .select('topic_id')
+    .eq('course_id', courseId)
+    .eq('user_id', userId)
+    .in('topic_id', topicIds)
+
+  const topicsWithCards = new Set((existingCards ?? []).map((c: { topic_id: string | null }) => c.topic_id).filter(Boolean))
+  const topicsNeedingCards = topics.filter((t: { topic_id: string }) => !topicsWithCards.has(t.topic_id)).slice(0, 5)
+
+  for (const topic of topicsNeedingCards) {
+    await runFlashcardAgent(userId, courseId, topic.topic_id).catch(() => {})
+  }
+}
+
 export async function runFlashcardAgent(
   userId: string,
   courseId: string,

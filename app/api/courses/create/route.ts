@@ -1,13 +1,17 @@
 import { createClient, createServiceClient } from '@/lib/supabase/server'
-import { runProfiler } from '@/lib/agents/profiler'
 import { getUserApiKey } from '@/lib/vault'
 import { requireOwnedProfessor } from '@/lib/authz'
 import { isUserSuspended, consumeAiQuota } from '@/lib/rate-limit'
 import { hasExpectedFileSignature } from '@/lib/file-validation'
 import { ICON_NAMES } from '@/lib/course-icon-names'
 import { serverError } from '@/lib/api-error'
+import { enqueueJob, kickJobs } from '@/lib/jobs'
 import Anthropic from '@anthropic-ai/sdk'
 import { NextResponse } from 'next/server'
+
+// Post-response job draining (syllabus profiling) runs inside this function's
+// budget via after() — give it room beyond the default.
+export const maxDuration = 300
 
 async function assignCourseIcon(userId: string, courseId: string, courseName: string) {
   const apiKey = await getUserApiKey(userId)
@@ -150,14 +154,16 @@ export async function POST(request: Request) {
 
     // Cap the syllabus-analysis AI work (shared 'profiler' daily quota with
     // onboarding). The course is already created; only enrichment is skipped.
+    // Durable job (F1): previously awaited inline — the request blocked behind
+    // two Sonnet calls and a failure was logged-and-lost. Drains post-response.
     if (await consumeAiQuota(user.id, 'profiler')) {
-      try {
-        // embed: this insert path skips the inbox pipeline, so the profiler must
-        // embed the syllabus for RAG (it was previously never embedded).
-        await runProfiler(user.id, material.material_id, courseId, name, { embed: true })
-      } catch (e) {
-        console.error('[courses/create] profiler failed', e)
-      }
+      // embed: this insert path skips the inbox pipeline, so the profiler must
+      // embed the syllabus for RAG (it was previously never embedded).
+      await enqueueJob(user.id, 'profile', {
+        subjectId: material.material_id,
+        payload: { courseId, courseName: name, embed: true },
+      })
+      kickJobs()
     } else {
       console.warn(`[courses/create] profiler skipped for ${user.id} — daily AI cap reached`)
     }

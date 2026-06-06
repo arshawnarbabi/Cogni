@@ -3,13 +3,15 @@ import type { DocumentBlockParam, ImageBlockParam, TextBlockParam } from '@anthr
 import { createServiceClient } from '@/lib/supabase/server'
 import { getUserApiKey } from '@/lib/vault'
 import { appendToLog } from '@/lib/wiki'
-import { runProfiler } from '@/lib/agents/profiler'
-import { runFlashcardAgent } from '@/lib/agents/flashcard'
-import { processEmbeddings } from '@/lib/rag'
 import { requireOwnedCourse } from '@/lib/authz'
 import { consumeAiQuota } from '@/lib/rate-limit'
 import { extractText, buildVisualBlock, extractContentFromVision } from '@/lib/extract-text'
 import { withRetry } from '@/lib/ai/call'
+import { enqueueJob, kickJobs } from '@/lib/jobs'
+
+// Embedding text rides in the job payload (the vision-extracted transcription is
+// not cheaply re-derivable in the worker). Cap to bound jsonb row size.
+const EMBED_PAYLOAD_CAP = 250_000
 
 type ClassifyResult = {
   courseId: string | null
@@ -115,7 +117,10 @@ export async function classifyMaterial(
     await service.from('inbox_items').update({ classification_status: 'classified', course_id: forceCourseId, tier: null }).eq('material_id', materialId).eq('user_id', userId)
     await appendToLog(userId, `Inbox: "${filename}" assigned directly to course ${forceCourseId}`)
     if (fullContent.length > 100) {
-      await processEmbeddings(userId, materialId, fullContent).catch(e => console.error('[rag] processEmbeddings failed', e))
+      // Durable job (F1): previously an awaited inline call — a throw lost the
+      // embeddings with no retry. Drained post-response + swept by cron.
+      await enqueueJob(userId, 'embed', { subjectId: materialId, payload: { text: fullContent.slice(0, EMBED_PAYLOAD_CAP) } })
+      kickJobs()
     }
     return { courseId: forceCourseId, tier: 4, status: 'classified', isHomework: false, dueDate: null }
   }
@@ -206,60 +211,46 @@ export async function classifyMaterial(
     if (visionText.length > 100) ragContent = visionText
   }
 
-  // Process embeddings for RAG
+  // The heavy tail (embed → profile → flashcards) becomes durable jobs (F1):
+  // previously inline awaits / fire-and-forget promises in the upload request —
+  // a serverless timeout or a throw after the HTTP 200 silently lost the work
+  // with no retry surface. Jobs drain post-response and are swept by cron.
+  let enqueuedAny = false
+
   if (ragContent.length > 100 && classificationStatus === 'classified') {
-    await processEmbeddings(userId, materialId, ragContent).catch(e => console.error('[rag] processEmbeddings failed', e))
+    await enqueueJob(userId, 'embed', { subjectId: materialId, payload: { text: ragContent.slice(0, EMBED_PAYLOAD_CAP) } })
+    enqueuedAny = true
   }
 
   // Auto-run profiler for syllabuses (tier 1) that were successfully classified.
-  // Charge it to its own 'profiler' bucket so inbox uploads can't bypass the
-  // profiler cap that onboarding/course-create enforce (inbox already consumed
-  // one 'inbox_classify' unit upstream).
+  // Quota charged at enqueue time to its own 'profiler' bucket so inbox uploads
+  // can't bypass the cap onboarding/course-create enforce.
   if (tier === 1 && courseId) {
     const courseName2 = (courses ?? []).find((c: { course_id: string; name: string }) => c.course_id === courseId)?.name ?? 'Course'
     if (await consumeAiQuota(userId, 'profiler')) {
-      await runProfiler(userId, materialId, courseId, courseName2)
+      await enqueueJob(userId, 'profile', { subjectId: materialId, payload: { courseId, courseName: courseName2 } })
+      enqueuedAny = true
     } else {
       console.warn(`[inbox] profiler skipped for ${userId} — daily AI cap reached`)
     }
   }
 
   // Auto-generate flashcards for tier 1 or 2 materials (own 'flashcards' bucket).
+  // Delayed slightly so the profiler's topics exist before card generation runs.
   if ((tier === 1 || tier === 2) && courseId && classificationStatus === 'classified') {
     if (await consumeAiQuota(userId, 'flashcards')) {
-      autoGenerateFlashcards(userId, courseId).catch(() => {})
+      await enqueueJob(userId, 'flashcards', {
+        payload: { courseId },
+        runAfter: tier === 1 ? new Date(Date.now() + 90_000) : undefined,
+      })
+      enqueuedAny = true
     } else {
       console.warn(`[inbox] flashcard auto-gen skipped for ${userId} — daily AI cap reached`)
     }
   }
 
+  if (enqueuedAny) kickJobs()
+
   return { courseId, tier, status: classificationStatus, isHomework, dueDate }
 }
 
-async function autoGenerateFlashcards(userId: string, courseId: string) {
-  const service = createServiceClient()
-
-  const { data: topics } = await service
-    .from('topics')
-    .select('topic_id, name')
-    .eq('course_id', courseId)
-    .eq('user_id', userId)
-
-  if (!topics || topics.length === 0) return
-
-  const topicIds = topics.map((t: { topic_id: string }) => t.topic_id)
-
-  const { data: existingCards } = await service
-    .from('flashcards')
-    .select('topic_id')
-    .eq('course_id', courseId)
-    .eq('user_id', userId)
-    .in('topic_id', topicIds)
-
-  const topicsWithCards = new Set((existingCards ?? []).map((c: { topic_id: string | null }) => c.topic_id).filter(Boolean))
-  const topicsNeedingCards = topics.filter((t: { topic_id: string }) => !topicsWithCards.has(t.topic_id)).slice(0, 5)
-
-  for (const topic of topicsNeedingCards) {
-    await runFlashcardAgent(userId, courseId, topic.topic_id).catch(() => {})
-  }
-}

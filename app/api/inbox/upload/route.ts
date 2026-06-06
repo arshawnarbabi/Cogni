@@ -11,6 +11,10 @@ import { auditLog } from '@/lib/app-config'
 import { serverError } from '@/lib/api-error'
 import { NextResponse } from 'next/server'
 
+// classifyMaterial enqueues the heavy tail (profile/embed/flashcards) as durable
+// jobs that drain post-response via after() — give the lambda room for them.
+export const maxDuration = 300
+
 export async function POST(request: Request) {
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
