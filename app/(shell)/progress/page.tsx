@@ -1,6 +1,7 @@
 import { createClient, createServiceClient } from '@/lib/supabase/server'
 import { redirect } from 'next/navigation'
 import { ProgressClient } from './_client'
+import { SemesterStanding } from './_standing'
 import { dateKeyInTimeZone } from '@/lib/time'
 
 type MasteryRow = { mastery_score: number | null }
@@ -298,6 +299,7 @@ export default async function ProgressPage() {
 
   return (
     <ProgressClient
+      standingSlot={<SemesterStanding userId={user.id} />}
       courses={shapedCourses}
       weakAreas={topWeakAreas}
       dueToday={flashcardRows?.length ?? 0}

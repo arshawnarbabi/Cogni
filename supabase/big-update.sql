@@ -535,6 +535,14 @@ create policy "lms_connections: own rows only" on public.lms_connections
 -- Map Cogni courses to Canvas courses for sync.
 alter table public.courses add column if not exists lms_course_id text;
 
+-- ======================================================================
+-- Section 19: Exam-linked practice attempts (S6)
+-- ======================================================================
+-- Ties a simulated exam attempt to the REAL exam it preps for, so attempt
+-- trends per exam are queryable and readiness can cite them.
+alter table public.practice_test_results add column if not exists exam_id uuid references public.exams(exam_id) on delete set null;
+create index if not exists idx_practice_results_exam on public.practice_test_results(exam_id) where exam_id is not null;
+
 -- PostgREST must see the new unique indexes + function signature before the
 -- app's upsert-on-conflict / RPC calls work.
 notify pgrst, 'reload schema';

@@ -285,11 +285,13 @@ export function ProgressClient({
   weakAreas,
   dueToday,
   testResults,
+  standingSlot,
 }: {
   courses: CourseProgress[]
   weakAreas: WeakArea[]
   dueToday: number
   testResults: TestResult[]
+  standingSlot?: React.ReactNode
 }) {
   const hasAnything = courses.length > 0 || testResults.length > 0
 
@@ -308,6 +310,9 @@ export function ProgressClient({
             </div>
           )}
         </div>
+
+        {/* Semester standing (S15) */}
+        {standingSlot}
 
         {!hasAnything ? (
           <div className="flex flex-col items-center justify-center gap-3 py-16 text-center">

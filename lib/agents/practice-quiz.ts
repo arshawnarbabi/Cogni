@@ -439,11 +439,25 @@ Return ONLY a JSON array with exactly ${shortAnswerIdx.length} objects, one per 
     console.error('[practice-quiz] missed-question card generation failed (non-fatal)', e)
   }
 
+  // S6: tie a simulated-exam attempt to the REAL exam it preps for, so attempt
+  // trends per exam are queryable and the semester dashboard can cite them.
+  let examId: string | null = null
+  if (testType === 'simulated_exam') {
+    const todayKey = new Date().toISOString().split('T')[0]
+    const { data: nearest } = await service
+      .from('exams').select('exam_id')
+      .eq('user_id', userId).eq('course_id', courseId)
+      .gte('date', todayKey).order('date', { ascending: true })
+      .limit(1).maybeSingle()
+    examId = nearest?.exam_id ?? null
+  }
+
   // Write result record
   const { error: resultError } = await service.from('practice_test_results').insert({
     user_id: userId,
     course_id: courseId,
     test_type: testType,
+    exam_id: examId,
     topic_filter: topicFilter ?? null,
     question_count: questions.length,
     correct_count: correctCount,
