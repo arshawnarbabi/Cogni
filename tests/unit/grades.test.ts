@@ -153,3 +153,43 @@ describe('courseGradeStatus — the at-risk signal (S1 integration)', () => {
     expect(courseGradeStatus(SCHEME, [])).toBeNull()
   })
 })
+
+describe('points-proportional remaining weight (pending final in a graded category)', () => {
+  // The real pre-finals case: Exams 50% has two graded midterms + an ungraded
+  // final; HW + Participation fully graded. The what-if MUST still project the final.
+  const items = [
+    { category: 'Exams', points_earned: 80, points_possible: 100 },      // midterm 1
+    { category: 'Exams', points_earned: 84, points_possible: 100 },      // midterm 2
+    { category: 'Exams', points_earned: null, points_possible: 100 },    // FINAL (ungraded)
+    { category: 'Homework', points_earned: 27, points_possible: 30 },
+    { category: 'Participation', points_earned: 20, points_possible: 20 },
+  ]
+
+  it('graded_weight reflects the pending final (not a false 100%)', () => {
+    const s = computeGradeSummary(SCHEME, items)
+    // Exams graded_share = 200/300; weight 50 → 33.3 graded. HW 30 + Part 20 = 50. Total ≈ 83.3.
+    expect(s.graded_weight_pct).toBeCloseTo(83.3, 0)
+    expect(s.graded_weight_pct).toBeLessThan(100)
+  })
+
+  it('the what-if PROJECTS the final instead of vanishing', () => {
+    const [b80, ace95] = whatIfTargets(SCHEME, items, [80, 95])
+    // Remaining = Exams 50·(1/3) ≈ 16.7 weight (the final).
+    // Locked: Exams 50·(2/3)·0.82 ≈ 27.3 + HW 30·0.9=27 + Part 20 = 74.3.
+    // 80%: (80-74.3)/16.7*100 ≈ 34% on the final — achievable.
+    expect(b80.needed_pct).not.toBeNull()
+    expect(b80.needed_pct!).toBeGreaterThan(20)
+    expect(b80.needed_pct!).toBeLessThan(50)
+    expect(b80.achievable).toBe(true)
+    // 95% needs more than even a perfect final can give → out of reach.
+    expect(ace95.needed_pct!).toBeGreaterThan(100)
+    expect(ace95.achievable).toBe(false)
+  })
+
+  it('a category with zero items counts as fully remaining', () => {
+    // Only Exams graded; HW + Participation have no items at all.
+    const [t] = whatIfTargets(SCHEME, [{ category: 'Exams', points_earned: 90, points_possible: 100 }], [80])
+    // Locked Exams 50·1·0.9 = 45; remaining HW30+Part20 = 50; 80%: (80-45)/50*100 = 70.
+    expect(t.needed_pct).toBe(70)
+  })
+})

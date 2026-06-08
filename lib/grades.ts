@@ -44,6 +44,38 @@ function norm(s: string): string {
   return s.trim().toLowerCase()
 }
 
+// Per-category points decomposition shared by the summary and the what-if so
+// they stay consistent. A category's weight splits between the portion already
+// GRADED and the portion still AHEAD, proportional to points_possible — so a
+// pending final inside an already-graded "Exams" category is correctly counted
+// as remaining work (the previous all-or-nothing-per-category model made it
+// invisible, and the headline what-if silently vanished before finals).
+type CatDecomp = {
+  category: string
+  weight_pct: number
+  earned_pct: number | null // over graded items only; null = nothing graded yet
+  graded_count: number
+  graded_share: number      // 0–1: fraction of the category's points that are graded
+}
+
+function decompose(scheme: SchemeCategory[], items: GradeItemInput[]): CatDecomp[] {
+  return scheme.map(c => {
+    const inCat = items.filter(i => i.category !== null && norm(i.category) === norm(c.category) && i.points_possible > 0)
+    const graded = inCat.filter(i => i.points_earned !== null)
+    const gradedPossible = graded.reduce((s, i) => s + i.points_possible, 0)
+    const totalPossible = inCat.reduce((s, i) => s + i.points_possible, 0)
+    const earned = graded.reduce((s, i) => s + (i.points_earned as number), 0)
+    return {
+      category: c.category,
+      weight_pct: c.weight_pct,
+      earned_pct: gradedPossible > 0 ? round1((earned / gradedPossible) * 100) : null,
+      graded_count: graded.length,
+      // No items at all → the whole category is future work (graded_share 0).
+      graded_share: totalPossible > 0 ? gradedPossible / totalPossible : 0,
+    }
+  })
+}
+
 export function computeGradeSummary(
   scheme: SchemeCategory[],
   items: GradeItemInput[],
@@ -63,21 +95,15 @@ export function computeGradeSummary(
     }
   }
 
-  const byCategory: CategorySummary[] = scheme.map(c => {
-    const inCat = graded.filter(i => i.category !== null && norm(i.category) === norm(c.category))
-    const possible = inCat.reduce((s, i) => s + i.points_possible, 0)
-    const earned = inCat.reduce((s, i) => s + (i.points_earned as number), 0)
-    return {
-      category: c.category,
-      weight_pct: c.weight_pct,
-      earned_pct: possible > 0 ? round1((earned / possible) * 100) : null,
-      graded_count: inCat.length,
-    }
-  })
+  const cats = decompose(scheme, items)
+  const byCategory: CategorySummary[] = cats.map(c => ({
+    category: c.category, weight_pct: c.weight_pct, earned_pct: c.earned_pct, graded_count: c.graded_count,
+  }))
 
-  const gradedCats = byCategory.filter(c => c.earned_pct !== null)
-  const gradedWeight = gradedCats.reduce((s, c) => s + c.weight_pct, 0)
-  const weightedSum = gradedCats.reduce((s, c) => s + c.weight_pct * (c.earned_pct as number), 0)
+  // Effective graded weight = Σ weight · graded_share; the grade is the average
+  // over that graded portion.
+  const gradedWeight = cats.reduce((s, c) => s + c.weight_pct * c.graded_share, 0)
+  const weightedSum = cats.reduce((s, c) => s + (c.earned_pct !== null ? c.weight_pct * c.graded_share * c.earned_pct : 0), 0)
 
   const schemeCategories = new Set(scheme.map(c => norm(c.category)))
   const uncategorized = items.filter(i => i.category === null || !schemeCategories.has(norm(i.category))).length
@@ -148,10 +174,12 @@ export function whatIfTargets(
   let remainingWeight: number    // weight still to be earned
 
   if (summary.mode === 'weighted') {
-    const gradedCats = summary.by_category.filter(c => c.earned_pct !== null)
-    gradedContribution = gradedCats.reduce((s, c) => s + (c.weight_pct * (c.earned_pct as number)) / 100, 0)
-    const totalWeight = scheme.reduce((s, c) => s + c.weight_pct, 0)
-    remainingWeight = Math.max(0, totalWeight - summary.graded_weight_pct)
+    // Points-proportional: grade points already locked in = Σ weight·graded_share·earned%,
+    // remaining weight = Σ weight·(1 − graded_share). A pending final inside a
+    // graded category contributes to remaining (so the what-if still projects it).
+    const cats = decompose(scheme, items)
+    gradedContribution = cats.reduce((s, c) => s + (c.earned_pct !== null ? (c.weight_pct * c.graded_share * c.earned_pct) / 100 : 0), 0)
+    remainingWeight = cats.reduce((s, c) => s + c.weight_pct * (1 - c.graded_share), 0)
   } else {
     // POINTS mode: remaining = recorded-but-ungraded items only.
     const graded = items.filter(i => i.points_earned !== null)
