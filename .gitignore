@@ -54,3 +54,8 @@ test-harness/screenshots/
 /playwright-report/
 /blob-report/
 .last-run.json
+
+# e2e showcase artifacts
+test-harness/.auth/
+test-harness/showcase/
+test-harness/pw-results/
