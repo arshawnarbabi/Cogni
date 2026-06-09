@@ -1,12 +1,4 @@
-import { createClient, createServiceClient } from '@/lib/supabase/server'
-
-export type AuthedUser = { id: string; email?: string }
-
-export async function getAuthedUser(): Promise<AuthedUser | null> {
-  const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
-  return user ? { id: user.id, email: user.email ?? undefined } : null
-}
+import { createServiceClient } from '@/lib/supabase/server'
 
 export async function requireOwnedCourse(userId: string, courseId: string) {
   const service = createServiceClient()

@@ -22,6 +22,7 @@ import { keyFailureKind, markKeyStatus } from '@/lib/ai/call'
 import { compactHistory, distillPreviousSessionIfNeeded } from '@/lib/agents/memory'
 import { armDistillJob, kickJobs } from '@/lib/jobs'
 import { recordUsage } from '@/lib/usage'
+import { log } from '@/lib/log'
 import Anthropic from '@anthropic-ai/sdk'
 import { NextResponse } from 'next/server'
 
@@ -565,7 +566,7 @@ export async function POST(request: Request) {
           // (cache_creation_input_tokens > 0); later turns/iterations should READ it
           // (cache_read_input_tokens > 0). Watch these logs to confirm hits.
           const u = final.usage
-          console.log('[tutor] usage', JSON.stringify({
+          log.debug('[tutor] usage', JSON.stringify({
             model: streamParams.model,
             iter: iterations,
             input: u.input_tokens,

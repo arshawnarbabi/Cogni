@@ -8,6 +8,7 @@ import { extractText, buildVisualBlock, extractContentFromVision } from '@/lib/e
 import { withRetry } from '@/lib/ai/call'
 import { effectiveMastery, carryoverSeed } from '@/lib/mastery'
 import { recordUsage } from '@/lib/usage'
+import { log } from '@/lib/log'
 
 // Character budgets for syllabus prompts. Previously 12k/10k chars, which silently
 // dropped the tail of long syllabi — and syllabi are chronological, so the tail is
@@ -610,7 +611,7 @@ export async function runProfiler(
         }),
         { onConflict: 'user_id,topic_id', ignoreDuplicates: true }
       )
-      if (carried > 0) console.log(`${tag} carried over prior mastery for ${carried}/${insertedTopics.length} topics (S9)`)
+      if (carried > 0) log.debug(`${tag} carried over prior mastery for ${carried}/${insertedTopics.length} topics (S9)`)
     }
   }
 

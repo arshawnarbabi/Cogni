@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk'
 import { createServiceClient } from '@/lib/supabase/server'
+import { log } from '@/lib/log'
 
 export async function runWebEnrichment(
   userId: string,
@@ -21,7 +22,7 @@ export async function runWebEnrichment(
     .maybeSingle()
 
   if (existing) {
-    console.log(`${tag} suggestion already exists, skipping`)
+    log.debug(`${tag} suggestion already exists, skipping`)
     return
   }
 
@@ -87,7 +88,7 @@ export async function runWebEnrichment(
     .trim()
 
   if (!finalText || /\bNOT_FOUND\b/.test(finalText) || finalText.length < 100) {
-    console.log(`${tag} no useful content found`)
+    log.debug(`${tag} no useful content found`)
     return
   }
 
@@ -97,5 +98,5 @@ export async function runWebEnrichment(
     content: finalText,
   })
 
-  console.log(`${tag} stored web suggestion (${finalText.length} chars)`)
+  log.debug(`${tag} stored web suggestion (${finalText.length} chars)`)
 }
