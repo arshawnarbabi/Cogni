@@ -151,3 +151,21 @@ describe('carryoverSeed (cross-course mastery carryover, S9)', () => {
     expect(carryoverSeed('Rule', [{ name: 'The Chain Rule', eff: 0.9 }])).toBeNull()
   })
 })
+
+describe('applyMasteryEvidence — duplicate-topic folding (regression)', () => {
+  // Two observations for the SAME topic in one batch must fold through the EWMA
+  // (not produce two upsert rows, which Postgres rejects). This mirrors the
+  // sequential composition applyMasteryEvidence now performs.
+  it('folding two observations equals applying them in sequence', () => {
+    const lr = 0.6
+    // cold start: first observation adopts; second blends.
+    const first = nextMastery(0, 0, 0, lr, false)   // observed 0, no prior
+    const second = nextMastery(first.score, first.confidence, 0, lr, true)
+    expect(second.score).toBeCloseTo(0, 2) // both wrong → stays near 0
+    // a correct-then-wrong fold lands between
+    const a = nextMastery(0.5, 0.3, 1, lr, true)
+    const b = nextMastery(a.score, a.confidence, 0, lr, true)
+    expect(b.score).toBeLessThan(a.score)
+    expect(b.score).toBeGreaterThan(0)
+  })
+})

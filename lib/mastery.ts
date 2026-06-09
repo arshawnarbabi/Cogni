@@ -243,12 +243,34 @@ export async function applyMasteryEvidence(
   const upserts: { user_id: string; topic_id: string; mastery_score: number; confidence: number; last_updated: string }[] = []
   const history: { user_id: string; topic_id: string; mastery_score: number }[] = []
 
+  // Group by topic and FOLD multiple observations for the same topic through the
+  // EWMA sequentially. Critical: a single upsert cannot touch the same
+  // (user_id, topic_id) twice — Postgres rejects "ON CONFLICT DO UPDATE command
+  // cannot affect row a second time" and the whole write fails. This happens
+  // routinely when a quiz's questions carry different sub-topic labels that all
+  // resolve to one tracked topic, so quiz mastery would silently never move.
+  const byTopic = new Map<string, EvidenceInput[]>()
   for (const e of evidences) {
-    const prior = existing.get(e.topicId)
-    const next = nextMastery(prior?.score ?? 0, prior?.confidence ?? 0, e.observed, e.learningRate, !!prior)
-    applied.push({ topicId: e.topicId, oldScore: prior?.score ?? 0, newScore: next.score, confidence: next.confidence })
-    upserts.push({ user_id: userId, topic_id: e.topicId, mastery_score: next.score, confidence: next.confidence, last_updated: nowIso })
-    history.push({ user_id: userId, topic_id: e.topicId, mastery_score: next.score })
+    const arr = byTopic.get(e.topicId) ?? []
+    arr.push(e)
+    byTopic.set(e.topicId, arr)
+  }
+
+  for (const [topicId, group] of byTopic) {
+    const prior = existing.get(topicId)
+    const oldScore = prior?.score ?? 0
+    let score = oldScore
+    let confidence = prior?.confidence ?? 0
+    let hasPrior = !!prior
+    for (const e of group) {
+      const next = nextMastery(score, confidence, e.observed, e.learningRate, hasPrior)
+      score = next.score
+      confidence = next.confidence
+      hasPrior = true // after the first observation, subsequent ones blend
+    }
+    applied.push({ topicId, oldScore, newScore: score, confidence })
+    upserts.push({ user_id: userId, topic_id: topicId, mastery_score: score, confidence, last_updated: nowIso })
+    history.push({ user_id: userId, topic_id: topicId, mastery_score: score })
   }
 
   const { error: masteryError } = await service

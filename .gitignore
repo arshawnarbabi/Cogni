@@ -59,3 +59,6 @@ test-harness/screenshots/
 test-harness/.auth/
 test-harness/showcase/
 test-harness/pw-results/
+
+test-harness/.anthropic-key
+test-harness/uploads/
