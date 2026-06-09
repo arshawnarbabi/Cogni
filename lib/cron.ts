@@ -1,10 +1,17 @@
+import { timingSafeEqual } from 'node:crypto'
 import * as Sentry from '@sentry/nextjs'
 import { createServiceClient } from '@/lib/supabase/server'
 
 export function isValidCronRequest(request: Request): boolean {
   const secret = process.env.CRON_SECRET
   if (!secret) return false
-  return request.headers.get('authorization') === `Bearer ${secret}`
+  const provided = request.headers.get('authorization')
+  const expected = `Bearer ${secret}`
+  // Constant-time comparison so a response-timing side channel can't be used to
+  // recover the secret byte-by-byte. Length-guard first (timingSafeEqual throws
+  // on length mismatch); the length of "Bearer <secret>" is not itself secret.
+  if (!provided || provided.length !== expected.length) return false
+  return timingSafeEqual(Buffer.from(provided), Buffer.from(expected))
 }
 
 /**

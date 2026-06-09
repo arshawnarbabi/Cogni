@@ -44,7 +44,9 @@ export async function POST(request: Request) {
     }
     // Provider hiccup (overloaded/network): don't block the save — the
     // circuit breaker will flag the key later if it's genuinely broken.
-    console.warn('[api-key] validation probe inconclusive, storing anyway', e)
+    // Log ONLY the status — the SDK error object can carry request headers
+    // (Authorization: Bearer <key>), so it must never reach the logs.
+    console.warn(`[api-key] Anthropic validation probe inconclusive (status ${status ?? 'n/a'}), storing anyway`)
   }
 
   const service = createServiceClient()

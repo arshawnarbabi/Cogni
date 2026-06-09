@@ -40,7 +40,9 @@ export async function POST(request: Request) {
     if (status === 401 || status === 403) {
       return NextResponse.json({ error: 'That OpenAI key was rejected by OpenAI. Check that you copied the full key (it should start with sk-).' }, { status: 400 })
     }
-    console.warn('[user/keys] validation probe inconclusive, storing anyway', e)
+    // Log ONLY the status — the SDK error object can carry request headers
+    // (Authorization: Bearer <key>), so it must never reach the logs.
+    console.warn(`[user/keys] OpenAI validation probe inconclusive (status ${status ?? 'n/a'}), storing anyway`)
   }
 
   try {
