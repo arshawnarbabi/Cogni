@@ -137,6 +137,13 @@ const handler = createMcpHandler(
       },
       guarded('get_course_overview', 'read', async ({ course_id }: { course_id: string }, userId, tz) => {
         const service = createServiceClient()
+        // Ownership precheck (consistent with the other course-scoped tools):
+        // every query below already filters by user_id (no data leak), but this
+        // returns a clear error for a foreign/unknown course_id instead of an
+        // empty overview.
+        const { data: ownedCourse } = await service
+          .from('courses').select('course_id').eq('user_id', userId).eq('course_id', course_id).maybeSingle()
+        if (!ownedCourse) throw new McpToolError('course_not_found', 'course_id must come from list_courses.')
         const today = await userToday(service, userId, tz)
         const [topics, exams, assignments, schemeRows, gradeRows] = await Promise.all([
           service.from('topics').select('topic_id, name, professor_weight, topic_mastery(mastery_score, last_updated)').eq('user_id', userId).eq('course_id', course_id),
