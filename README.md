@@ -5,8 +5,9 @@
   <img src="https://img.shields.io/badge/Next.js-16-black" alt="Next.js" />
   <img src="https://img.shields.io/badge/TypeScript-5-3178C6" alt="TypeScript" />
   <img src="https://img.shields.io/badge/Supabase-PostgreSQL-3ECF8E" alt="Supabase" />
-  <img src="https://img.shields.io/badge/Claude-Sonnet%204.6-CC785C" alt="Claude" />
-  <img src="https://img.shields.io/badge/release-v1.3.1-1D4ED8" alt="v1.3.1" />
+  <img src="https://img.shields.io/badge/Claude-Opus%204.8%20%7C%20Sonnet%204.6%20%7C%20Haiku%204.5-CC785C" alt="Claude" />
+  <img src="https://img.shields.io/badge/MCP-bring%20your%20own%20Claude-CC785C" alt="MCP" />
+  <img src="https://img.shields.io/badge/release-v2.0.0-1D4ED8" alt="v2.0.0" />
   <img src="https://img.shields.io/badge/hosting-self--host%20%7C%20multi--tenant-7C3AED" alt="Self-host or multi-tenant" />
   <img src="https://img.shields.io/badge/status-beta-F59E0B" alt="Beta" />
   <a href="https://trycogni.arshawnarbabi.com/"><img src="https://img.shields.io/badge/website-trycogni.arshawnarbabi.com-1D4ED8" alt="Website" /></a>
@@ -15,11 +16,11 @@
 
 <br />
 
-Cogni decides what to study, when to study, and how — so you just show up. Feed it your syllabi, lecture notes, past exams, and course materials. It classifies and processes everything automatically, extracts your topics, maps your professor's grading weights, and generates a prioritized study plan every morning based on your current mastery and upcoming exams. The tutor pulls from your actual course materials. Flashcards are scheduled by FSRS at the card and topic level. Study blocks land in your Google Calendar. All you do is study. Always BYOK on Vercel + Supabase.
+Cogni decides what to study, when to study, and how — so you just show up. Feed it your syllabi, lecture notes, past exams, and course materials. It classifies and processes everything automatically, extracts your topics, maps your professor's grading weights, and generates a prioritized study plan every morning based on your current mastery, upcoming exams, and grade risk. The tutor pulls from your actual course materials **and remembers you between sessions**. Flashcards are scheduled by FSRS at the card and topic level. It tracks your grades and tells you exactly what you need on the final. You can even study through your **own Claude** via MCP. All you do is study. Always BYOK on Vercel + Supabase.
 
 Run it two ways: **self-hosted** for a single user, or **hosted multi-tenant** — one operator running a public instance for many users (open / invite-code / `.edu` signup gating, per-user AI quotas, kill-switches, legal pages, and more). Either way it stays BYOK and self-hostable.
 
-> **v1.3.0 — "Production Hardening · Multi-Tenant Ready":** Cogni is now production-hardened for public, multi-tenant hosting in addition to single-user self-hosting. Everything is additive and BYOK; see [Production / multi-tenant hosting](#-production--multi-tenant-hosting).
+> **v2.0.0 — "Memory · MCP · Grades":** persistent tutor memory between sessions, a built-in MCP server (study through your own Claude), grade tracking with a "what do I need on the final" calculator, Canvas import, semester standing, and mastery decay — on top of the v1.3 production-hardening. Everything is additive and BYOK. **Requires running [`supabase/big-update.sql`](supabase/big-update.sql) once before deploying** (idempotent).
 
 > **Beta:** Cogni is under active development. Expect rough edges, verify important study data, and test thoroughly before relying on it for critical coursework.
 
@@ -27,9 +28,10 @@ Run it two ways: **self-hosted** for a single user, or **hosted multi-tenant** �
 
 ## 🔄 How it works
 
-1. **Upload your course materials** — syllabi, lecture notes, past exams, anything you have. Claude classifies each file, extracts topics with professor weights, exam dates, and grade breakdowns. Your course is fully mapped in minutes.
-2. **Every morning at 5am UTC, a plan is generated** — the scheduler scores every topic by mastery deficit, professor weight, and exam proximity. It allocates your session time, orders your flashcard review, and writes study blocks to Google Calendar.
-3. **Open the app and study** — flashcard review, tutor sessions, and quizzes all update your mastery in real time. Tomorrow's plan adapts to what you did today.
+1. **Upload your course materials** — syllabi, lecture notes, past exams, anything you have. Claude classifies each file, extracts topics with professor weights, exam dates, the grade breakdown, and prerequisite links. Your course is fully mapped in minutes.
+2. **Every morning a plan is generated** — the scheduler scores every topic by mastery deficit, professor weight, exam proximity, *and grade risk*. It allocates your session time, orders your flashcard review, and writes study blocks to your calendar.
+3. **Open the app and study** — flashcard review, tutor sessions, and quizzes all update your mastery in real time. The tutor **remembers you between sessions** and opens with a recap. Tomorrow's plan adapts to what you did today.
+4. **Or study through your own Claude** — connect Cogni as an MCP server and review cards, run exam prep, and log sessions from Claude Code / Desktop. It all writes back to your mastery, schedule, and streak.
 
 You don't decide what to study. Cogni does.
 
@@ -100,16 +102,36 @@ You don't decide what to study. Cogni does.
 
 - **FSRS spaced repetition** — full card-level state (stability, difficulty, reps, lapses). 4-point ratings: Again / Hard / Good / Easy. Atomic RPC updates FSRS state and topic mastery in one transaction.
 - **AI study planner** — daily plan prioritized by mastery deficit × professor weight × exam proximity. Generates a 6-day ahead preview. Writes flashcard review blocks to Google Calendar. Plans, streaks, due cards, and calendar blocks all use your local timezone (auto-detected at onboarding).
-- **Claude-powered tutor** — four modes: Answer (direct), Teach (Socratic), Focus (weak-area routing), Essay (split-view editor with tracked changes). Deep thinking mode switches to Claude Opus 4.7 with extended thinking for hard problems. Native web search. Inline flashcard, quiz, chart, and Mermaid-diagram generation. Session persistence with auto-naming.
+- **Claude-powered tutor** — four modes: Answer (direct), Teach (Socratic), Focus (weak-area routing), Essay (split-view editor with tracked changes). Deep thinking mode switches to Claude Opus 4.8 with extended thinking for hard problems. Native web search. Inline flashcard, quiz, chart, and Mermaid-diagram generation. Session persistence with auto-naming.
 - **Professor profiling** — builds a per-professor wiki from past exams, syllabi, and graded materials. Tracks question depth, phrasing style, and topic weights. Persists across semesters — add a new course with the same professor and their profile is already there.
 - **Syllabus profiler** — upload a PDF, Claude extracts topics with professor weights, exam dates, and grade breakdowns. RAG-enriched before extraction.
 - **RAG over course materials** — pgvector with OpenAI text-embedding-3-small (1536 dims). Keyword search fallback if no OpenAI key. Top-5 chunks injected into every tutor context.
 - **Inbox pipeline** — upload files or notes → Haiku (+ vision) classifies tier, course, and due date → auto-triggers profiler (tier 1) and flashcard generation (tier 1–2).
-- **Wiki memory** — tutor writes durable insights to per-user markdown files (`learning_profile.md`, `weak_areas.md`, `professor_*.md`). Loaded verbatim into every session — no retrieval step.
-- **Practice quiz + simulated exam** — MC and short-answer, auto-graded. Simulated exam mirrors your professor's style and topic weighting using wiki context. Mastery updated on grade.
-- **Audio overview** — Claude Sonnet scripts a two-host podcast from your course materials; OpenAI TTS converts it to audio. Requires both an Anthropic and OpenAI key.
-- **Google Calendar integration** — study blocks scheduled during 8am–10pm, written to a dedicated "Cogni Study" calendar.
+- **Persistent tutor memory** — after a session ends, a single Haiku call distills it into a session summary, a rolling per-course digest, and typed facts (misconceptions, preferences, goals). The next session opens with a *"welcome back — last time…"* recap, and the misconceptions feed back into your study plan. Memory is viewable, deletable, and pausable in Settings.
+- **Wiki memory** — the tutor and profiler also write durable insights to per-user markdown files (`learning_profile.md`, `professor_*.md`), loaded verbatim into every session.
+- **Grade tracker + "what do I need?"** — a per-course gradebook (scheme auto-extracted from your syllabus, or synced from Canvas). Shows your current weighted grade and the answer to the real question — *"I need 84% on the final for an A"* — with secured/out-of-reach states.
+- **Semester standing** — one honest verdict per course (on-track / at-risk / critical) composed from grade risk, exam readiness, overdue work, and study consistency, surfaced at the top of Progress.
+- **Mastery decay** — knowledge you crammed and ignored decays over time (read-time, after a 7-day grace, 60-day half-life), so a stale high score resurfaces in your weak areas instead of lying to you.
+- **Canvas import** — paste your school's Canvas URL + a personal access token to pull assignments, due dates, the grading scheme, and your released grades; auto-syncs every morning. (BYO token; nothing stored but the token, in the Vault.)
+- **Practice quiz + simulated exam** — MC and short-answer, auto-graded. Difficulty auto-calibrates to your mastery; missed questions become flashcards. Simulated exams mirror your professor's style and tie to the real exam. Mastery updated on grade.
+- **Calendar feed (ICS)** — subscribe to a read-only feed of exams, due dates, and study blocks from any calendar app — no OAuth. (Google Calendar write integration also available.)
+- **Usage & cost dashboard** — per-surface spend on your own keys, plus a *"prompt caching saved you $X"* figure.
+- **Audio overview** — Claude scripts a two-host podcast from your materials; OpenAI TTS converts it to audio. Requires both keys.
 - **BYOK** — Anthropic and OpenAI keys stored in Supabase Vault (encrypted). No AI keys in env vars.
+
+<br />
+
+## 🔌 Connect your own Claude (MCP)
+
+Cogni ships a built-in **Model Context Protocol** server, so you can study through Claude Code or Claude Desktop using your *own* Claude subscription — and everything writes back to your account.
+
+Generate a token in **Settings → Connect your Claude**, then `claude mcp add` the URL it shows. `/mcp` then exposes **14 tools** and **4 prompts**:
+
+- **Read** — `list_courses`, `get_course_overview` (incl. your grade standing), `get_weak_topics`, `search_materials`, `get_due_cards`, `get_learning_profile`, `get_study_plan`, `research` (multi-query, cited)
+- **Write** — `review_card` (FSRS + mastery), `grade_answer`, `create_flashcards` (paced), `log_study_session` (memory + streak), `complete_assignment` (replans), `record_quiz_result`
+- **Prompts** — `tutor`, `exam_prep`, `review_session`, `homework_help`
+
+Tokens are stored only as SHA-256 hashes with a 180-day expiry. Every call is guarded (fail-closed writes, per-day read/write quotas, ownership-validated) and audited.
 
 <br />
 
@@ -133,6 +155,16 @@ Exam proximity multipliers: >30 days = 1×, >14 = 1.5×, >7 = 2×, >3 = 3×, ≤
 
 **Inbox classification pipeline.** Upload → Haiku (+ vision for PDFs/images) classifies tier (1 = syllabus, 2 = primary, 3 = supplementary, 4 = misc), course, homework status, and due date → triggers profiler for tier-1 materials → triggers flashcard generation for tier-1 and tier-2 materials with fewer than 5 existing cards per topic.
 
+**Persistent memory system.** ~45 minutes after a session's last message (or lazily on next open), a single Haiku call distills the transcript into a `session_summaries` row, a rolling `course_memory` digest (≤3200 chars), and typed `student_memory` facts. Recorded misconceptions feed the scheduler; the digest is injected into the next session's prompt and surfaced as a recap. Long histories are compacted (cached brief + last 12 verbatim) so the first token is never gated by summarization.
+
+**Mastery decay.** Mastery is stored as a unified EWMA evidence score, but read everywhere through `effectiveMastery = score · exp(−ln2 · (days − 7) / 60)` after a 7-day grace — so the scheduler, weak-areas, readiness, and MCP all reflect what you know *now*, not what you crammed weeks ago.
+
+**Durable job substrate.** Profiling, embedding, flashcard generation, and memory distillation run as rows in a `jobs` table claimed via `FOR UPDATE SKIP LOCKED` (with an expired-lock reaper). Post-response draining (`after()`) keeps uploads and onboarding fast; a daily cron sweeps anything left.
+
+**Grade math.** Per-course weighted grade with points-proportional remaining weight, so the "what do I need on the final?" projection works even with a pending final inside an already-graded category. The grade-risk signal feeds the scheduler (priority boost), the daily insight, the tutor's context, and the semester-standing verdict.
+
+**Prompt caching.** Up to four cache breakpoints (tools, static system, RAG block, last user message) cut repeat-context cost; a per-surface usage ledger estimates spend and cache savings.
+
 <br />
 
 ## 🛠️ Tech Stack
@@ -142,9 +174,10 @@ Exam proximity multipliers: >30 days = 1×, >14 = 1.5×, >7 = 2×, >3 = 3×, ≤
 | Framework | Next.js 16, React 19, TypeScript 5 |
 | Database | Supabase (PostgreSQL + pgvector + Auth + Storage) |
 | AI — reasoning | Claude Sonnet 4.6 (tutor, profiler, exams, web enrichment) |
-| AI — deep thinking | Claude Opus 4.7 with extended thinking (tutor deep think mode) |
+| AI — deep thinking | Claude Opus 4.8 with extended thinking (tutor deep think mode) |
 | AI — lightweight | Claude Haiku 4.5 (flashcards, quizzes, inbox classification, session naming) |
 | AI — embeddings | OpenAI text-embedding-3-small (optional; enables RAG) |
+| MCP server | @modelcontextprotocol/sdk (bring-your-own-Claude: 14 tools, 4 prompts) |
 | Spaced repetition | ts-fsrs 5.3.2 |
 | Styling | Tailwind CSS 4, shadcn/ui |
 | Animation | Framer Motion |
@@ -171,7 +204,8 @@ Fork the repo and deploy to Vercel, or run locally with `npm run dev`. **Vercel 
 
 Create a new Supabase project, then **enable the Vault extension** (Dashboard → Database → Extensions → `supabase_vault`) — it stores your API keys and calendar tokens. Then set up the database:
 
-- **Quick:** paste [`supabase/setup.sql`](supabase/setup.sql) into the SQL editor and run it once. It bundles every migration in the correct order and is idempotent, so it's safe to re-run later to pick up schema changes.
+- **Fresh install:** paste [`supabase/setup.sql`](supabase/setup.sql) into the SQL editor and run it once. It bundles every migration (through v2.0.0) in the correct order and is idempotent, so it's safe to re-run.
+- **Upgrading from v1.3.x:** run [`supabase/big-update.sql`](supabase/big-update.sql) once — it adds everything in v2.0.0 (memory, MCP tokens, grades, Canvas, jobs, semester data) and is self-contained + idempotent. `setup.sql` and `old-prod + big-update.sql` produce a byte-identical schema.
 - **Manual:** run the individual files in the order in [`supabase/README.md`](supabase/README.md).
 
 **Step 3 — Environment variables**
