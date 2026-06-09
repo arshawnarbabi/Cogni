@@ -61,4 +61,5 @@ test-harness/showcase/
 test-harness/pw-results/
 
 test-harness/.anthropic-key
-test-harness/uploads/
+test-harness/mega/
+test-harness/live/

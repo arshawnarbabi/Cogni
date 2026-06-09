@@ -1,0 +1,27 @@
+BIO 93 — Lecture Notes: The Central Dogma & Gene Expression
+
+DNA STRUCTURE
+DNA is a double helix of antiparallel strands. Bases pair A-T (2 H-bonds) and
+G-C (3 H-bonds). The 5' to 3' directionality matters for replication and
+transcription. Dr. Vasquez emphasizes: ALWAYS specify strand directionality on
+exams — a missing 5'/3' label is a full deduction.
+
+DNA REPLICATION
+Semiconservative. Leading strand synthesized continuously 5'->3'; lagging strand
+in Okazaki fragments. Key enzymes: helicase (unwinds), primase (RNA primer), DNA
+polymerase III (extends), DNA polymerase I (replaces primer), ligase (seals).
+
+TRANSCRIPTION
+RNA polymerase reads the template strand 3'->5', synthesizing mRNA 5'->3'. In
+eukaryotes: 5' cap, poly-A tail, and splicing of introns. The non-standard rule
+for this class: Dr. Vasquez uses "sense strand" to mean the coding strand
+(same sequence as mRNA except T->U), which differs from some textbooks.
+
+TRANSLATION
+Ribosome reads mRNA codons 5'->3'. Start codon AUG (Met). Three stop codons:
+UAA, UAG, UGA. tRNA brings amino acids; the anticodon pairs with the codon.
+Wobble allows some flexibility at the third position.
+
+GENE REGULATION (PROKARYOTES)
+The lac operon: inducible, controlled by a repressor and CAP. When lactose is
+present and glucose is absent, transcription is maximal.

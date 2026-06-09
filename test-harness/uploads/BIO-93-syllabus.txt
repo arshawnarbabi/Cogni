@@ -1,0 +1,43 @@
+BIO 93 — DNA to Organisms
+Instructor: Dr. Elena Vasquez (office hours Tue/Thu 2-3pm)
+Fall 2026 · MWF 10:00-10:50am
+
+COURSE DESCRIPTION
+An introduction to molecular biology, genetics, and cell biology, building from the
+structure of DNA through gene expression to the organization of multicellular organisms.
+
+GRADING
+- Midterm 1: 20%
+- Midterm 2: 20%
+- Final Exam: 35%
+- Problem Sets (8): 15%
+- Participation: 10%
+
+EXAM SCHEDULE
+- Midterm 1: October 9, 2026 (covers Units 1-3, 75 minutes)
+- Midterm 2: November 13, 2026 (covers Units 4-6, 75 minutes)
+- Final Exam: December 14, 2026 (cumulative, 120 minutes)
+
+TOPICS BY WEEK
+Week 1: DNA structure and the central dogma
+Week 2: DNA replication and repair mechanisms
+Week 3: Transcription and RNA processing
+Week 4: Translation and the genetic code
+Week 5: Regulation of gene expression in prokaryotes
+Week 6: Regulation of gene expression in eukaryotes
+Week 7: Mendelian genetics and inheritance patterns
+Week 8: Linkage, recombination, and genetic mapping
+Week 9: Mutations and DNA damage
+Week 10: Cell cycle and mitosis
+Week 11: Meiosis and sexual reproduction
+Week 12: Developmental biology and differentiation
+
+ASSIGNMENTS (due Fridays 11:59pm)
+- Problem Set 1: due September 12, 2026 (DNA structure)
+- Problem Set 2: due September 26, 2026 (replication)
+- Problem Set 3: due October 17, 2026 (transcription/translation)
+- Problem Set 4: due October 31, 2026 (gene regulation)
+
+LATE POLICY: 10% per day, no submissions accepted after 3 days late.
+PREREQUISITES: Translation builds on transcription; genetic mapping requires
+understanding of linkage and recombination.
