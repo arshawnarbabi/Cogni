@@ -8,6 +8,9 @@ import { newCardDefaults } from '@/lib/fsrs'
 import { assignNewCardDueDates } from '@/lib/agents/flashcard'
 import Anthropic from '@anthropic-ai/sdk'
 
+type TopicNameRow = { topic_id: string; name: string }
+type TopicWeightRow = { name: string; professor_weight: number | null; content_coverage: number | null }
+
 export type QuizFormat = 'mc' | 'short_answer' | 'mixed'
 
 export type QuizQuestion = {
@@ -73,11 +76,9 @@ export async function generatePracticeQuiz(
     if (t) masteryMap.set(t.topic_id, effectiveMastery((m as { mastery_score: number | null }).mastery_score, (m as { last_updated: string | null }).last_updated))
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const quizTopics = (allTopics ?? []).filter((t: any) => !topicFilter || t.name.toLowerCase().includes(topicFilter.toLowerCase()))
+  const quizTopics = ((allTopics ?? []) as TopicNameRow[]).filter(t => !topicFilter || t.name.toLowerCase().includes(topicFilter.toLowerCase()))
   const topicList = quizTopics
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    .map((t: any) => `- ${t.name} (mastery: ${Math.round((masteryMap.get(t.topic_id) ?? 0) * 100)}%)`)
+    .map(t => `- ${t.name} (mastery: ${Math.round((masteryMap.get(t.topic_id) ?? 0) * 100)}%)`)
     .join('\n')
 
   // I7: when the caller didn't pin a difficulty, pick it from the student's
@@ -85,9 +86,8 @@ export async function generatePracticeQuiz(
   // recall, strong topics get synthesis/edge-case questions. A fixed 'medium'
   // wasted both ends.
   if (!difficulty) {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const levels = quizTopics.map((t: any) => masteryMap.get(t.topic_id) ?? 0)
-    const avg = levels.length > 0 ? levels.reduce((s: number, v: number) => s + v, 0) / levels.length : 0
+    const levels = quizTopics.map(t => masteryMap.get(t.topic_id) ?? 0)
+    const avg = levels.length > 0 ? levels.reduce((s, v) => s + v, 0) / levels.length : 0
     difficulty = avg < 0.35 ? 'easy' : avg > 0.7 ? 'hard' : 'medium'
   }
 
@@ -200,9 +200,8 @@ export async function generateSimulatedExam(
     .order('professor_weight', { ascending: false })
     .limit(20)
 
-  const topicList = (topics ?? [])
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    .map((t: any) => `- ${t.name} (professor weight: ${Math.round(Number(t.professor_weight) * 100)}%)`)
+  const topicList = ((topics ?? []) as TopicWeightRow[])
+    .map(t => `- ${t.name} (professor weight: ${Math.round(Number(t.professor_weight) * 100)}%)`)
     .join('\n')
 
   const client = new Anthropic({ apiKey })
