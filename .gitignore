@@ -63,3 +63,4 @@ test-harness/pw-results/
 test-harness/.anthropic-key
 test-harness/mega/
 test-harness/live/
+test-harness/grades-ui/
