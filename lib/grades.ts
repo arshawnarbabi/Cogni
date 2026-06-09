@@ -29,13 +29,21 @@ export type CategorySummary = {
 }
 
 export type GradeSummary = {
-  mode: 'weighted' | 'points'
+  mode: 'weighted' | 'points' | 'manual'
   /** Current grade 0–100 over what's been graded so far (null = nothing graded). */
   current_pct: number | null
   /** Of the total scheme weight, how much has at least one graded item. */
   graded_weight_pct: number
   by_category: CategorySummary[]
   uncategorized_count: number
+}
+
+/** Direct class-grade input (F2): the student's current grade plus how much of
+ *  the grade is still ungraded — enough to drive the display AND the what-if
+ *  without item-level tracking. */
+export type GradeOverride = {
+  current_pct: number
+  remaining_weight_pct: number
 }
 
 const round1 = (n: number) => Math.round(n * 10) / 10
@@ -79,7 +87,19 @@ function decompose(scheme: SchemeCategory[], items: GradeItemInput[]): CatDecomp
 export function computeGradeSummary(
   scheme: SchemeCategory[],
   items: GradeItemInput[],
+  override?: GradeOverride | null,
 ): GradeSummary {
+  if (override) {
+    // F2: manual mode — the grade IS the typed number; "graded weight" is
+    // everything except the remaining-ungraded portion.
+    return {
+      mode: 'manual',
+      current_pct: round1(override.current_pct),
+      graded_weight_pct: round1(Math.max(0, 100 - override.remaining_weight_pct)),
+      by_category: [],
+      uncategorized_count: 0,
+    }
+  }
   const graded = items.filter(i => i.points_earned !== null && i.points_possible > 0)
 
   if (scheme.length === 0) {
@@ -132,10 +152,10 @@ export type CourseGradeStatus = {
  * remaining, or the B- is already out of reach. Returns null when nothing is
  * graded yet (no signal — don't alarm a fresh course).
  */
-export function courseGradeStatus(scheme: SchemeCategory[], items: GradeItemInput[]): CourseGradeStatus | null {
-  const summary = computeGradeSummary(scheme, items)
+export function courseGradeStatus(scheme: SchemeCategory[], items: GradeItemInput[], override?: GradeOverride | null): CourseGradeStatus | null {
+  const summary = computeGradeSummary(scheme, items, override)
   if (summary.current_pct === null) return null
-  const [whatIf80] = whatIfTargets(scheme, items, [80])
+  const [whatIf80] = whatIfTargets(scheme, items, [80], override)
   const needed = whatIf80.needed_pct
   const at_risk =
     summary.current_pct < 75 ||
@@ -167,13 +187,19 @@ export function whatIfTargets(
   scheme: SchemeCategory[],
   items: GradeItemInput[],
   targets: number[] = [90, 80, 70],
+  override?: GradeOverride | null,
 ): WhatIf[] {
-  const summary = computeGradeSummary(scheme, items)
+  const summary = computeGradeSummary(scheme, items, override)
 
   let gradedContribution: number // grade points already locked in (0–100 scale)
   let remainingWeight: number    // weight still to be earned
 
-  if (summary.mode === 'weighted') {
+  if (override) {
+    // F2: the two manual fields ARE the projection — current grade over the
+    // graded portion, with `remaining_weight_pct` still to earn.
+    gradedContribution = (override.current_pct / 100) * Math.max(0, 100 - override.remaining_weight_pct)
+    remainingWeight = override.remaining_weight_pct
+  } else if (summary.mode === 'weighted') {
     // Points-proportional: grade points already locked in = Σ weight·graded_share·earned%,
     // remaining weight = Σ weight·(1 − graded_share). A pending final inside a
     // graded category contributes to remaining (so the what-if still projects it).

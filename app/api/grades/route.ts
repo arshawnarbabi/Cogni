@@ -28,14 +28,25 @@ export async function GET(request: Request) {
   if (!(await requireOwnedCourse(user.id, courseId))) return notFound('course_not_found')
 
   const service = createServiceClient()
-  const [{ data: schemeRows }, { data: itemRows }] = await Promise.all([
+  const [{ data: schemeRows }, { data: itemRows }, { data: manualRow }] = await Promise.all([
     service.from('course_grade_schemes').select('category, weight_pct').eq('user_id', user.id).eq('course_id', courseId).order('weight_pct', { ascending: false }),
-    service.from('grade_items').select('item_id, category, name, points_earned, points_possible, graded_at, source').eq('user_id', user.id).eq('course_id', courseId).order('graded_at', { ascending: false }),
+    service.from('grade_items').select('item_id, category, name, points_earned, points_possible, graded_at, source, confirmed').eq('user_id', user.id).eq('course_id', courseId).order('graded_at', { ascending: false }),
+    service.from('course_grade_manual').select('current_pct, remaining_weight_pct').eq('user_id', user.id).eq('course_id', courseId).maybeSingle(),
   ])
+
+  // F2: a course in "manual" mode uses the typed override for the grade + what-if.
+  const override = manualRow
+    ? { current_pct: Number(manualRow.current_pct), remaining_weight_pct: Number(manualRow.remaining_weight_pct) }
+    : null
 
   const scheme: SchemeCategory[] = ((schemeRows ?? []) as { category: string; weight_pct: number }[])
     .map(s => ({ category: s.category, weight_pct: Number(s.weight_pct) }))
-  const items = (itemRows ?? []) as { item_id: string; category: string | null; name: string; points_earned: number | null; points_possible: number; graded_at: string; source: string }[]
+  const allItems = (itemRows ?? []) as { item_id: string; category: string | null; name: string; points_earned: number | null; points_possible: number; graded_at: string; source: string; confirmed: boolean }[]
+  // F1: only CONFIRMED items count toward the grade + what-if. Unconfirmed
+  // (upload-extracted) items are pending suggestions surfaced separately so a
+  // vision misread can never silently move the grade.
+  const items = allItems.filter(i => i.confirmed)
+  const pending = allItems.filter(i => !i.confirmed)
   const itemInputs: GradeItemInput[] = items.map(i => ({
     category: i.category,
     points_earned: i.points_earned !== null ? Number(i.points_earned) : null,
@@ -45,8 +56,11 @@ export async function GET(request: Request) {
   return NextResponse.json({
     scheme,
     items,
-    summary: computeGradeSummary(scheme, itemInputs),
-    whatIf: whatIfTargets(scheme, itemInputs, [90, 80, 70]),
+    pending,
+    mode: override ? 'manual' : 'tracked',
+    override,
+    summary: computeGradeSummary(scheme, itemInputs, override),
+    whatIf: whatIfTargets(scheme, itemInputs, [90, 80, 70], override),
   })
 }
 
@@ -85,7 +99,7 @@ export async function PATCH(request: Request) {
 
   const body = await request.json() as {
     itemId?: string; name?: string; category?: string | null
-    points_earned?: number | null; points_possible?: number
+    points_earned?: number | null; points_possible?: number; confirmed?: boolean
   }
   if (!body.itemId) return badRequest('missing_itemId')
 
@@ -103,6 +117,8 @@ export async function PATCH(request: Request) {
     if (typeof body.points_possible !== 'number' || body.points_possible <= 0) return badRequest('invalid_points_possible')
     updates.points_possible = body.points_possible
   }
+  // F1: confirm a pending upload-extracted grade (optionally alongside edits).
+  if (body.confirmed !== undefined) updates.confirmed = body.confirmed === true
   if (Object.keys(updates).length === 0) return badRequest('no_updates')
 
   const service = createServiceClient()

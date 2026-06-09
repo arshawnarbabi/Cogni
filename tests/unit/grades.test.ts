@@ -193,3 +193,39 @@ describe('points-proportional remaining weight (pending final in a graded catego
     expect(t.needed_pct).toBe(70)
   })
 })
+
+describe('GradeOverride — direct class-grade input (F2)', () => {
+  it('manual summary reports the typed grade + graded weight', () => {
+    const s = computeGradeSummary(SCHEME, [], { current_pct: 84, remaining_weight_pct: 30 })
+    expect(s.mode).toBe('manual')
+    expect(s.current_pct).toBe(84)
+    expect(s.graded_weight_pct).toBe(70) // 100 − 30
+  })
+
+  it('the what-if projects from the two manual fields', () => {
+    // 84% over 70% graded → locked 58.8; remaining 30.
+    const [a90, b80, c70] = whatIfTargets(SCHEME, [], [90, 80, 70], { current_pct: 84, remaining_weight_pct: 30 })
+    expect(a90.needed_pct).toBeCloseTo(104, 0)
+    expect(a90.achievable).toBe(false)
+    expect(b80.needed_pct).toBeCloseTo(70.7, 0)
+    expect(b80.achievable).toBe(true)
+    expect(c70.needed_pct).toBeCloseTo(37.3, 0)
+  })
+
+  it('fully-graded manual grade (0% remaining) has no remaining what-if', () => {
+    const [t] = whatIfTargets(SCHEME, [], [80], { current_pct: 88, remaining_weight_pct: 0 })
+    expect(t.needed_pct).toBeNull()
+    expect(t.achievable).toBe(true) // 88 ≥ 80
+  })
+
+  it('a manual grade drives the at-risk signal', () => {
+    expect(courseGradeStatus(SCHEME, [], { current_pct: 62, remaining_weight_pct: 0 })!.at_risk).toBe(true)
+    expect(courseGradeStatus(SCHEME, [], { current_pct: 92, remaining_weight_pct: 0 })!.at_risk).toBe(false)
+  })
+
+  it('override ignores items entirely (items present but override wins)', () => {
+    const items = [{ category: 'Exams', points_earned: 100, points_possible: 100 }]
+    const s = computeGradeSummary(SCHEME, items, { current_pct: 50, remaining_weight_pct: 0 })
+    expect(s.current_pct).toBe(50) // not 100 from the item
+  })
+})

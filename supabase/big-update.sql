@@ -543,6 +543,41 @@ alter table public.courses add column if not exists lms_course_id text;
 alter table public.practice_test_results add column if not exists exam_id uuid references public.exams(exam_id) on delete set null;
 create index if not exists idx_practice_results_exam on public.practice_test_results(exam_id) where exam_id is not null;
 
+-- ======================================================================
+-- Section 20: Grade-input on-ramps (v2.1)
+--   F1 — upload-extracted grades (confirm-first): a 'upload' source +
+--        a `confirmed` flag (unconfirmed = a pending suggestion, not counted).
+--   F2 — direct class-grade input: course_grade_manual (current % + remaining
+--        ungraded weight %), the no-tracking fallback that still powers what-if.
+-- Idempotent — safe on fresh installs and existing v2.0 databases.
+-- ======================================================================
+
+-- F1: confirm-first uploads. ALTERs (not just the CREATE above) so existing
+-- grade_items tables pick these up on re-run.
+alter table public.grade_items add column if not exists confirmed boolean not null default true;
+alter table public.grade_items drop constraint if exists grade_items_source_check;
+alter table public.grade_items add constraint grade_items_source_check
+  check (source in ('manual', 'canvas', 'exam', 'upload'));
+-- Pending (unconfirmed) suggestions are queried per course for the confirm UI.
+create index if not exists idx_grade_items_pending
+  on public.grade_items(user_id, course_id) where confirmed = false;
+
+-- F2: direct class-grade input — one row per course when the student opts out
+-- of item tracking. current_pct over the graded portion + how much weight is
+-- still ungraded (so "what do I need on the final" still works).
+create table if not exists public.course_grade_manual (
+  user_id uuid not null references public.users(user_id) on delete cascade,
+  course_id uuid not null references public.courses(course_id) on delete cascade,
+  current_pct numeric(5,2) not null check (current_pct >= 0 and current_pct <= 100),
+  remaining_weight_pct numeric(5,2) not null default 0 check (remaining_weight_pct >= 0 and remaining_weight_pct <= 100),
+  updated_at timestamptz not null default now(),
+  primary key (user_id, course_id)
+);
+alter table public.course_grade_manual enable row level security;
+drop policy if exists "course_grade_manual: own rows only" on public.course_grade_manual;
+create policy "course_grade_manual: own rows only" on public.course_grade_manual
+  for select using (auth.uid() = user_id);
+
 -- PostgREST must see the new unique indexes + function signature before the
 -- app's upsert-on-conflict / RPC calls work.
 notify pgrst, 'reload schema';

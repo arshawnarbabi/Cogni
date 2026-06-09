@@ -4,7 +4,7 @@ import { addDaysToDateKey, dateKeyInTimeZone, daysBetweenDateKeys } from '@/lib/
 import { prettifyTitle } from '@/lib/filename'
 import { effectiveMastery } from '@/lib/mastery'
 import { computeExamReadiness, type ExamReadiness } from '@/lib/readiness'
-import { courseGradeStatus, type CourseGradeStatus, type SchemeCategory, type GradeItemInput } from '@/lib/grades'
+import { courseGradeStatus, type CourseGradeStatus, type SchemeCategory, type GradeItemInput, type GradeOverride } from '@/lib/grades'
 
 export type TaskItem =
   | {
@@ -259,9 +259,10 @@ export async function runScheduler(userId: string): Promise<void> {
   // they're cruising in — regardless of card counts.
   const gradeStatusByCourse = new Map<string, CourseGradeStatus>()
   {
-    const [{ data: schemeRows }, { data: itemRows }] = await Promise.all([
+    const [{ data: schemeRows }, { data: itemRows }, { data: manualRows }] = await Promise.all([
       service.from('course_grade_schemes').select('course_id, category, weight_pct').eq('user_id', userId).in('course_id', courseIds),
-      service.from('grade_items').select('course_id, category, points_earned, points_possible').eq('user_id', userId).in('course_id', courseIds),
+      service.from('grade_items').select('course_id, category, points_earned, points_possible').eq('user_id', userId).in('course_id', courseIds).eq('confirmed', true),
+      service.from('course_grade_manual').select('course_id, current_pct, remaining_weight_pct').eq('user_id', userId).in('course_id', courseIds),
     ])
     const schemesByCourse = new Map<string, SchemeCategory[]>()
     for (const s of (schemeRows ?? []) as { course_id: string; category: string; weight_pct: number }[]) {
@@ -275,8 +276,13 @@ export async function runScheduler(userId: string): Promise<void> {
       arr.push({ category: i.category, points_earned: i.points_earned !== null ? Number(i.points_earned) : null, points_possible: Number(i.points_possible) })
       itemsByCourse.set(i.course_id, arr)
     }
+    // F2: a manual grade override per course (drives the same risk signal).
+    const overrideByCourse = new Map<string, GradeOverride>()
+    for (const m of (manualRows ?? []) as { course_id: string; current_pct: number; remaining_weight_pct: number }[]) {
+      overrideByCourse.set(m.course_id, { current_pct: Number(m.current_pct), remaining_weight_pct: Number(m.remaining_weight_pct) })
+    }
     for (const cid of courseIds) {
-      const status = courseGradeStatus(schemesByCourse.get(cid) ?? [], itemsByCourse.get(cid) ?? [])
+      const status = courseGradeStatus(schemesByCourse.get(cid) ?? [], itemsByCourse.get(cid) ?? [], overrideByCourse.get(cid) ?? null)
       if (status) gradeStatusByCourse.set(cid, status)
     }
   }

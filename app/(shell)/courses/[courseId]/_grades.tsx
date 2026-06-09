@@ -8,13 +8,15 @@ import { Exam, Plus, Trash, CircleNotch } from '@phosphor-icons/react'
 
 type Scheme = { category: string; weight_pct: number }
 type Item = { item_id: string; category: string | null; name: string; points_earned: number | null; points_possible: number; graded_at: string; source: string }
+type Pending = { item_id: string; category: string | null; name: string; points_earned: number | null; points_possible: number }
 type Summary = {
-  mode: 'weighted' | 'points'
+  mode: 'weighted' | 'points' | 'manual'
   current_pct: number | null
   graded_weight_pct: number
   by_category: { category: string; weight_pct: number; earned_pct: number | null; graded_count: number }[]
   uncategorized_count: number
 }
+type Override = { current_pct: number; remaining_weight_pct: number }
 type WhatIf = { target_pct: number; needed_pct: number | null; achievable: boolean; already_secured: boolean }
 
 function gradeColor(pct: number | null): string {
@@ -29,12 +31,16 @@ export function CourseGrades({ courseId }: { courseId: string }) {
   const [loading, setLoading] = useState(true)
   const [scheme, setScheme] = useState<Scheme[]>([])
   const [items, setItems] = useState<Item[]>([])
+  const [pending, setPending] = useState<Pending[]>([])
   const [summary, setSummary] = useState<Summary | null>(null)
   const [whatIf, setWhatIf] = useState<WhatIf[]>([])
   const [adding, setAdding] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [form, setForm] = useState({ name: '', category: '', earned: '', possible: '' })
+  const [mode, setMode] = useState<'tracked' | 'manual'>('tracked')
+  const [showManual, setShowManual] = useState(false)
+  const [manualForm, setManualForm] = useState({ current: '', remaining: '' })
 
   const load = useCallback(async () => {
     try {
@@ -43,8 +49,12 @@ export function CourseGrades({ courseId }: { courseId: string }) {
       const d = await res.json()
       setScheme(d.scheme ?? [])
       setItems(d.items ?? [])
+      setPending(d.pending ?? [])
       setSummary(d.summary ?? null)
       setWhatIf(d.whatIf ?? [])
+      setMode(d.mode ?? 'tracked')
+      const ov = d.override as Override | null
+      if (ov) setManualForm({ current: String(ov.current_pct), remaining: String(ov.remaining_weight_pct) })
     } catch {
       setError('Could not load grades.')
     } finally {
@@ -90,6 +100,70 @@ export function CourseGrades({ courseId }: { courseId: string }) {
     }
   }
 
+  async function confirmPending(itemId: string) {
+    setBusy(true)
+    try {
+      const res = await fetch('/api/grades', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ itemId, confirmed: true }),
+      })
+      if (!res.ok) throw new Error()
+      await load()
+    } catch {
+      setError('Could not confirm. Try again.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function saveManual() {
+    const current = parseFloat(manualForm.current)
+    const remaining = manualForm.remaining.trim() === '' ? 0 : parseFloat(manualForm.remaining)
+    if (!Number.isFinite(current) || current < 0 || current > 100) {
+      setError('Enter your current grade as a number 0–100.')
+      return
+    }
+    if (!Number.isFinite(remaining) || remaining < 0 || remaining > 100) {
+      setError('"% still ungraded" must be 0–100.')
+      return
+    }
+    setBusy(true)
+    setError('')
+    try {
+      const res = await fetch('/api/grades/manual', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ courseId, current_pct: current, remaining_weight_pct: remaining }),
+      })
+      if (!res.ok) throw new Error()
+      setShowManual(false)
+      await load()
+    } catch {
+      setError('Could not save your grade. Try again.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function clearManual() {
+    setBusy(true)
+    try {
+      const res = await fetch('/api/grades/manual', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ courseId }),
+      })
+      if (!res.ok) throw new Error()
+      setShowManual(false)
+      await load()
+    } catch {
+      setError('Could not switch back. Try again.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
   async function removeItem(itemId: string) {
     setBusy(true)
     try {
@@ -122,15 +196,45 @@ export function CourseGrades({ courseId }: { courseId: string }) {
         <h2 className="flex items-center gap-1.5 text-sm font-semibold text-foreground">
           <Exam size={15} className="text-primary" /> Grades
         </h2>
-        <button
-          onClick={() => setAdding(a => !a)}
-          className="flex items-center gap-1 rounded-lg border border-border px-2.5 py-1 text-[11px] font-medium text-foreground transition-colors hover:bg-muted"
-        >
-          <Plus size={11} /> Add grade
-        </button>
+        {mode === 'tracked' && (
+          <button
+            onClick={() => setAdding(a => !a)}
+            className="flex items-center gap-1 rounded-lg border border-border px-2.5 py-1 text-[11px] font-medium text-foreground transition-colors hover:bg-muted"
+          >
+            <Plus size={11} /> Add grade
+          </button>
+        )}
       </div>
 
       {error && <p className="text-xs text-red-500">{error}</p>}
+
+      {/* Pending grades extracted from uploads — confirm before they count (F1) */}
+      {mode === 'tracked' && pending.length > 0 && (
+        <div className="flex flex-col gap-2 rounded-xl border border-amber-300/60 bg-amber-50 p-3 dark:border-amber-700/50 dark:bg-amber-950/20">
+          <p className="text-[11px] font-medium text-amber-700 dark:text-amber-400">
+            Found {pending.length} grade{pending.length === 1 ? '' : 's'} in your uploads — confirm to count {pending.length === 1 ? 'it' : 'them'}.
+          </p>
+          {pending.map(p => (
+            <div key={p.item_id} className="flex items-center justify-between gap-2 rounded-lg border border-amber-200/70 bg-card px-3 py-2 dark:border-amber-800/40">
+              <div className="min-w-0">
+                <p className="truncate text-xs font-medium text-foreground">{p.name}</p>
+                <p className="text-[10px] text-muted-foreground">{p.category ?? 'uncategorized'} · from an upload</p>
+              </div>
+              <div className="flex shrink-0 items-center gap-2">
+                <span className="text-xs tabular-nums text-foreground">{p.points_earned}/{p.points_possible}</span>
+                <button onClick={() => confirmPending(p.item_id)} disabled={busy}
+                  className="rounded-lg bg-primary px-2.5 py-1 text-[11px] font-semibold text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50">
+                  Confirm
+                </button>
+                <button onClick={() => removeItem(p.item_id)} disabled={busy}
+                  className="text-muted-foreground transition-colors hover:text-red-500 disabled:opacity-50" title="Dismiss">
+                  <Trash size={12} />
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
 
       {/* Current grade + what-if */}
       <div className="flex flex-col gap-3 rounded-xl border border-border bg-card p-4">
@@ -140,7 +244,7 @@ export function CourseGrades({ courseId }: { courseId: string }) {
               {summary?.current_pct !== null && summary?.current_pct !== undefined ? `${summary.current_pct}%` : '—'}
             </p>
             <p className="text-[11px] text-muted-foreground">
-              current grade{summary?.mode === 'weighted' && summary.graded_weight_pct > 0 ? ` · ${summary.graded_weight_pct}% of the course graded` : ''}
+              current grade{summary?.mode === 'weighted' && summary.graded_weight_pct > 0 ? ` · ${summary.graded_weight_pct}% of the course graded` : summary?.mode === 'manual' ? ' · entered manually' : ''}
             </p>
           </div>
           {summary?.mode === 'weighted' && summary.by_category.length > 0 && (
@@ -177,8 +281,42 @@ export function CourseGrades({ courseId }: { courseId: string }) {
         )}
       </div>
 
+      {/* Manual grade mode (F2): a banner with edit / switch-back */}
+      {mode === 'manual' && !showManual && (
+        <div className="flex items-center justify-between gap-2 rounded-xl border border-border bg-card px-4 py-2.5">
+          <p className="text-[11px] text-muted-foreground">
+            Grade entered manually{Number(manualForm.remaining) > 0 ? ` · ${manualForm.remaining}% of the grade still ungraded` : ''}.
+          </p>
+          <div className="flex items-center gap-3">
+            <button onClick={() => setShowManual(true)} className="text-[11px] font-medium text-primary hover:underline">Edit</button>
+            <button onClick={clearManual} disabled={busy} className="text-[11px] text-muted-foreground transition-colors hover:text-foreground disabled:opacity-50">Switch to tracking</button>
+          </div>
+        </div>
+      )}
+
+      {/* Manual grade form (2 fields keep the what-if working) */}
+      {showManual && (
+        <div className="flex flex-wrap items-end gap-2 rounded-xl border border-border bg-card p-3">
+          <label className="flex w-28 flex-col gap-1 text-[11px] text-muted-foreground">
+            Current grade
+            <input value={manualForm.current} onChange={e => setManualForm(f => ({ ...f, current: e.target.value }))}
+              placeholder="84" inputMode="decimal" className="rounded-lg border border-border bg-background px-2 py-1.5 text-xs text-foreground" />
+          </label>
+          <label className="flex w-36 flex-col gap-1 text-[11px] text-muted-foreground">
+            % still ungraded
+            <input value={manualForm.remaining} onChange={e => setManualForm(f => ({ ...f, remaining: e.target.value }))}
+              placeholder="30 (optional)" inputMode="decimal" className="rounded-lg border border-border bg-background px-2 py-1.5 text-xs text-foreground" />
+          </label>
+          <button onClick={saveManual} disabled={busy}
+            className="rounded-lg bg-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50">
+            {busy ? <CircleNotch size={13} className="animate-spin" /> : 'Save'}
+          </button>
+          <button onClick={() => setShowManual(false)} className="text-[11px] text-muted-foreground transition-colors hover:text-foreground">Cancel</button>
+        </div>
+      )}
+
       {/* Add form */}
-      {adding && (
+      {mode === 'tracked' && adding && (
         <div className="flex flex-wrap items-end gap-2 rounded-xl border border-border bg-card p-3">
           <label className="flex flex-1 min-w-36 flex-col gap-1 text-[11px] text-muted-foreground">
             Name
@@ -213,7 +351,7 @@ export function CourseGrades({ courseId }: { courseId: string }) {
       )}
 
       {/* Items */}
-      {items.length > 0 && (
+      {mode === 'tracked' && items.length > 0 && (
         <div className="flex flex-col gap-1.5">
           {items.map(i => (
             <div key={i.item_id} className="flex items-center justify-between gap-2 rounded-lg border border-border/60 bg-card px-3 py-2">
@@ -238,10 +376,17 @@ export function CourseGrades({ courseId }: { courseId: string }) {
           ))}
         </div>
       )}
-      {items.length === 0 && !adding && (
+      {mode === 'tracked' && items.length === 0 && !adding && (
         <p className="text-xs text-muted-foreground">
-          No grades yet — add them as you get them back{scheme.length > 0 ? ' (the grading scheme came from your syllabus)' : ''}, or connect Canvas in Settings to import them automatically.
+          No grades yet — add them as you get them back{scheme.length > 0 ? ' (the grading scheme came from your syllabus)' : ''}, upload a graded paper to extract one, or connect Canvas in Settings to import them automatically.
         </p>
+      )}
+
+      {/* Switch to the no-tracking manual path (F2) */}
+      {mode === 'tracked' && !showManual && (
+        <button onClick={() => setShowManual(true)} className="text-left text-[11px] text-muted-foreground transition-colors hover:text-foreground">
+          Don&apos;t want to track every assignment? <span className="text-primary">Just enter your current grade →</span>
+        </button>
       )}
     </div>
   )

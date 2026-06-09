@@ -145,19 +145,24 @@ const handler = createMcpHandler(
           .from('courses').select('course_id').eq('user_id', userId).eq('course_id', course_id).maybeSingle()
         if (!ownedCourse) throw new McpToolError('course_not_found', 'course_id must come from list_courses.')
         const today = await userToday(service, userId, tz)
-        const [topics, exams, assignments, schemeRows, gradeRows] = await Promise.all([
+        const [topics, exams, assignments, schemeRows, gradeRows, manualRow] = await Promise.all([
           service.from('topics').select('topic_id, name, professor_weight, topic_mastery(mastery_score, last_updated)').eq('user_id', userId).eq('course_id', course_id),
           service.from('exams').select('date, grade_weight').eq('user_id', userId).eq('course_id', course_id).gte('date', today).order('date'),
           service.from('assignments').select('name, due_date, completion_status').eq('user_id', userId).eq('course_id', course_id).eq('completion_status', 'pending').order('due_date'),
           service.from('course_grade_schemes').select('category, weight_pct').eq('user_id', userId).eq('course_id', course_id),
-          service.from('grade_items').select('category, points_earned, points_possible').eq('user_id', userId).eq('course_id', course_id),
+          service.from('grade_items').select('category, points_earned, points_possible').eq('user_id', userId).eq('course_id', course_id).eq('confirmed', true),
+          service.from('course_grade_manual').select('current_pct, remaining_weight_pct').eq('user_id', userId).eq('course_id', course_id).maybeSingle(),
         ])
 
         // S1: the student's standing + stakes, so the connected Claude tutors
         // with the same urgency the in-app tutor has.
+        const gradeOverride = manualRow.data
+          ? { current_pct: Number(manualRow.data.current_pct), remaining_weight_pct: Number(manualRow.data.remaining_weight_pct) }
+          : null
         const gradeStatus = courseGradeStatus(
           ((schemeRows.data ?? []) as { category: string; weight_pct: number }[]).map(s => ({ category: s.category, weight_pct: Number(s.weight_pct) })),
           ((gradeRows.data ?? []) as { category: string | null; points_earned: number | null; points_possible: number }[]).map(i => ({ category: i.category, points_earned: i.points_earned !== null ? Number(i.points_earned) : null, points_possible: Number(i.points_possible) })),
+          gradeOverride,
         )
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const topicsOut = (topics.data ?? []).map((t: any) => {

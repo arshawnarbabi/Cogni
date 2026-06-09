@@ -81,21 +81,26 @@ export async function buildTutorSystemPrompt(
 ): Promise<{ static: string; rag: string; dynamic: string }> {
   const service = createServiceClient()
 
-  const [learningProfile, professorWiki, courseMemory, prereqResult, schemeResult, gradeItemsResult] = await Promise.all([
+  const [learningProfile, professorWiki, courseMemory, prereqResult, schemeResult, gradeItemsResult, manualResult] = await Promise.all([
     readWikiFile(userId, 'learning_profile.md'),
     opts?.professorId ? readWikiFile(userId, `professor_${opts.professorId}.md`) : Promise.resolve(null),
     getCourseMemory(userId, courseId).catch(() => null),
     service.from('topic_prerequisites').select('topic_id, prereq_topic_id').eq('user_id', userId).eq('course_id', courseId),
     service.from('course_grade_schemes').select('category, weight_pct').eq('user_id', userId).eq('course_id', courseId),
-    service.from('grade_items').select('category, points_earned, points_possible').eq('user_id', userId).eq('course_id', courseId),
+    service.from('grade_items').select('category, points_earned, points_possible').eq('user_id', userId).eq('course_id', courseId).eq('confirmed', true),
+    service.from('course_grade_manual').select('current_pct, remaining_weight_pct').eq('user_id', userId).eq('course_id', courseId).maybeSingle(),
   ])
 
   // S1: the tutor knows the student's actual standing and stakes in THIS course.
+  const gradeOverride = manualResult.data
+    ? { current_pct: Number(manualResult.data.current_pct), remaining_weight_pct: Number(manualResult.data.remaining_weight_pct) }
+    : null
   const gradeStatus = courseGradeStatus(
     ((schemeResult.data ?? []) as { category: string; weight_pct: number }[])
       .map(s => ({ category: s.category, weight_pct: Number(s.weight_pct) })) as SchemeCategory[],
     ((gradeItemsResult.data ?? []) as { category: string | null; points_earned: number | null; points_possible: number }[])
       .map(i => ({ category: i.category, points_earned: i.points_earned !== null ? Number(i.points_earned) : null, points_possible: Number(i.points_possible) })) as GradeItemInput[],
+    gradeOverride,
   )
   const gradeSection = gradeStatus
     ? `\n## Course standing\nCurrent grade: ${gradeStatus.current_pct}%${gradeStatus.needed_for_b !== null ? ` — needs ${gradeStatus.needed_for_b}% on the remaining work to finish at 80%` : ''}.${gradeStatus.at_risk ? ' The grade is AT RISK: treat every session as high-stakes, prioritize exam-relevant material, and be direct about what must improve.' : ''}`

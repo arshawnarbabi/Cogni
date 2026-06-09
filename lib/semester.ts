@@ -1,5 +1,5 @@
 import { createServiceClient } from '@/lib/supabase/server'
-import { courseGradeStatus, type CourseGradeStatus, type SchemeCategory, type GradeItemInput } from '@/lib/grades'
+import { courseGradeStatus, type CourseGradeStatus, type SchemeCategory, type GradeItemInput, type GradeOverride } from '@/lib/grades'
 import { computeExamReadiness, type ExamReadiness } from '@/lib/readiness'
 import { dateKeyInTimeZone, addDaysToDateKey, isValidTimeZone } from '@/lib/time'
 
@@ -69,13 +69,14 @@ export async function computeSemesterStanding(userId: string): Promise<CourseSta
   if (courseRows.length === 0) return []
   const courseIds = courseRows.map(c => c.course_id)
 
-  const [readiness, { data: schemeRows }, { data: itemRows }, { data: overdueRows }, { data: reviewRows }] = await Promise.all([
+  const [readiness, { data: schemeRows }, { data: itemRows }, { data: overdueRows }, { data: reviewRows }, { data: manualRows }] = await Promise.all([
     computeExamReadiness(userId, { horizonDays: 14 }).catch(() => [] as ExamReadiness[]),
     service.from('course_grade_schemes').select('course_id, category, weight_pct').eq('user_id', userId).in('course_id', courseIds),
-    service.from('grade_items').select('course_id, category, points_earned, points_possible').eq('user_id', userId).in('course_id', courseIds),
+    service.from('grade_items').select('course_id, category, points_earned, points_possible').eq('user_id', userId).in('course_id', courseIds).eq('confirmed', true),
     service.from('assignments').select('course_id').eq('user_id', userId).eq('completion_status', 'pending').gte('due_date', overdueFloor).lt('due_date', today),
     // course-scoped consistency: reviews join flashcards for the course id
     service.from('review_logs').select('card_id, reviewed_at, flashcards!inner(course_id)').eq('user_id', userId).gte('reviewed_at', fourteenDaysAgo),
+    service.from('course_grade_manual').select('course_id, current_pct, remaining_weight_pct').eq('user_id', userId).in('course_id', courseIds),
   ])
 
   const readinessByCourse = new Map<string, ExamReadiness>()
@@ -105,9 +106,13 @@ export async function computeSemesterStanding(userId: string): Promise<CourseSta
     const cid = r.flashcards?.course_id
     if (cid) reviewsByCourse.set(cid, (reviewsByCourse.get(cid) ?? 0) + 1)
   }
+  const overrideByCourse = new Map<string, GradeOverride>()
+  for (const m of (manualRows ?? []) as { course_id: string; current_pct: number; remaining_weight_pct: number }[]) {
+    overrideByCourse.set(m.course_id, { current_pct: Number(m.current_pct), remaining_weight_pct: Number(m.remaining_weight_pct) })
+  }
 
   return courseRows.map(course => {
-    const grade = courseGradeStatus(schemesByCourse.get(course.course_id) ?? [], itemsByCourse.get(course.course_id) ?? [])
+    const grade = courseGradeStatus(schemesByCourse.get(course.course_id) ?? [], itemsByCourse.get(course.course_id) ?? [], overrideByCourse.get(course.course_id) ?? null)
     const nearExam = readinessByCourse.get(course.course_id) ?? null
     const overdue = overdueByCourse.get(course.course_id) ?? 0
     const reviews14d = reviewsByCourse.get(course.course_id) ?? 0
