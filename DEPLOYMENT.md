@@ -1,6 +1,6 @@
 # Cogni — Deployment Runbook (manual `[you]` steps)
 
-All the **code-side** production-readiness work is done — merged to `main` and released as **v1.3.0**.
+All the **code-side** production-readiness work is done — merged to `main` and released as **v2.0.0** (building on the v1.3.0 production-hardening).
 This is the ordered list of the **manual steps only you can do** (accounts, dashboards, decisions). Do them in order. See `.env.example` for every variable.
 
 > ## 💸 Cost: $0 — this whole pilot runs on free tiers

@@ -20,7 +20,7 @@ Cogni decides what to study, when to study, and how — so you just show up. Fee
 
 Run it two ways: **self-hosted** for a single user, or **hosted multi-tenant** — one operator running a public instance for many users (open / invite-code / `.edu` signup gating, per-user AI quotas, kill-switches, legal pages, and more). Either way it stays BYOK and self-hostable.
 
-> **v2.0.0 — "Memory · MCP · Grades":** persistent tutor memory between sessions, a built-in MCP server (study through your own Claude), grade tracking with a "what do I need on the final" calculator, Canvas import, semester standing, and mastery decay — on top of the v1.3 production-hardening. Everything is additive and BYOK. **Requires running [`supabase/big-update.sql`](supabase/big-update.sql) once before deploying** (idempotent).
+> **v2.0.0 — "Memory · MCP · Grades":** persistent tutor memory between sessions, a built-in MCP server (study through your own Claude), grade tracking with a "what do I need on the final" calculator, Canvas import, semester standing, and mastery decay — on top of the v1.3 production-hardening. Everything is additive and BYOK. **Requires running [`supabase/big-update.sql`](supabase/big-update.sql) once before deploying** (idempotent). See the [CHANGELOG](CHANGELOG.md) for the full list.
 
 > **Beta:** Cogni is under active development. Expect rough edges, verify important study data, and test thoroughly before relying on it for critical coursework.
 
@@ -112,6 +112,8 @@ You don't decide what to study. Cogni does.
 - **Grade tracker + "what do I need?"** — a per-course gradebook (scheme auto-extracted from your syllabus, or synced from Canvas). Shows your current weighted grade and the answer to the real question — *"I need 84% on the final for an A"* — with secured/out-of-reach states.
 - **Semester standing** — one honest verdict per course (on-track / at-risk / critical) composed from grade risk, exam readiness, overdue work, and study consistency, surfaced at the top of Progress.
 - **Mastery decay** — knowledge you crammed and ignored decays over time (read-time, after a 7-day grace, 60-day half-life), so a stale high score resurfaces in your weak areas instead of lying to you.
+- **Prerequisite graph** — the profiler links topics to what they build on; a weak prerequisite (mastery < 40%) boosts its priority and the tutor remediates it before the dependent topic.
+- **Exam readiness** — a 0–100 prep score per upcoming exam (weighted effective mastery + practice-test history + coverage), feeding the daily insight, the study plan, and semester standing.
 - **Canvas import** — paste your school's Canvas URL + a personal access token to pull assignments, due dates, the grading scheme, and your released grades; auto-syncs every morning. (BYO token; nothing stored but the token, in the Vault.)
 - **Practice quiz + simulated exam** — MC and short-answer, auto-graded. Difficulty auto-calibrates to your mastery; missed questions become flashcards. Simulated exams mirror your professor's style and tie to the real exam. Mastery updated on grade.
 - **Calendar feed (ICS)** — subscribe to a read-only feed of exams, due dates, and study blocks from any calendar app — no OAuth. (Google Calendar write integration also available.)
@@ -139,13 +141,15 @@ Tokens are stored only as SHA-256 hashes with a 180-day expiry. Every call is gu
 
 **Two-level spaced repetition.** Each flashcard carries full FSRS state (`stability`, `difficulty`, `reps`, `lapses`, `state`, `last_review`, `next_review_date`). Topic mastery is a separate blended score updated on every review, quiz, and exam. The scheduler uses topic mastery to allocate session time; FSRS drives card-level scheduling independently.
 
-**Atomic review RPC.** `review_card_atomic()` runs a single Postgres transaction that updates all FSRS fields on the flashcard and applies a mastery delta to `topic_mastery`. Mastery deltas: Again = −0.1, Hard = +0.02, Good = +0.08, Easy = +0.12, clamped 0–1.
+**Atomic review RPC.** `review_card_atomic()` runs a single Postgres transaction that updates all FSRS fields on the flashcard and applies mastery evidence to `topic_mastery` (idempotent per rating tap via a `client_review_id` gate).
+
+**Unified mastery model (EWMA).** Every source of evidence — flashcard reviews, quizzes, exams, tutor grading, and distilled conversation signals — updates topic mastery through one exponential moving average: `next = old + learning_rate × (observed − old)` (cold-start adopts the observed value; confidence rises +0.05 per event). Observed level by flashcard rating: Again = 0, Hard = 0.45, Good = 0.75, Easy = 1.0. Learning rates by source: tutor_grade 0.35, quiz_standalone 0.6, quiz_in_session 0.3, exam 0.7, conversation 0.12, and flashcard_base 0.25 scaled by 1/√(cards in topic). The displayed score is no longer path-order-dependent.
 
 **Scheduler priority formula.**
 ```
-priority = (professor_weight − mastery_score) × professor_weight × examProximityMultiplier
+priority = (deficit) × professor_weight × examProximityMultiplier × gradeRiskBoost × prereqBoost
 ```
-Exam proximity multipliers: >30 days = 1×, >14 = 1.5×, >7 = 2×, >3 = 3×, ≤3 = 5×. Session minutes are allocated proportionally across courses.
+where `deficit = professor_weight − effectiveMastery` (+0.15 if the topic has a recently-recorded misconception), `prereqBoost = 1.3×` for a weak prerequisite (mastery < 0.4), and `gradeRiskBoost = 1.25×` when the course's grade is at risk. Exam proximity multipliers: >30 days = 1×, >14 = 1.5×, >7 = 2×, >3 = 3×, ≤3 = 5×; a grade-weight multiplier scales by the upcoming exam's share of the final grade. Mastery is read as time-decayed `effectiveMastery`. Session minutes are allocated proportionally across courses, capped at 4 review blocks/day.
 
 **Karpathy wiki pattern.** The tutor has a `write_wiki_pattern` tool that writes markdown to per-user files in Supabase Storage. The profiler writes `professor_*.md` on every syllabus upload. All wiki files are loaded verbatim into tutor session context on every request — no vector retrieval, just direct inject.
 
@@ -231,7 +235,7 @@ Add these to your Vercel project settings (or `.env.local` for local dev):
 | `CRON_HEARTBEAT_MAINTENANCE_URL` | Optional | Heartbeat alert URL for the maintenance cron |
 | `OPERATOR_SECRET` | Optional | Bearer secret guarding the operator console + audit endpoints |
 
-The optional vars above the calendar row power v1.3.0's [production / multi-tenant hardening](#-production--multi-tenant-hosting). Every one is a **no-op if unset**, so a single-user self-host can ignore them.
+The optional vars above the calendar row power the [production / multi-tenant hardening](#-production--multi-tenant-hosting). Every one is a **no-op if unset**, so a single-user self-host can ignore them.
 
 Anthropic and OpenAI keys are **not** env vars. Users add them in Settings after deploying.
 
@@ -281,7 +285,7 @@ Cogni runs two ways:
 
 **Free-tier deployable ($0).** A full production instance runs on free tiers: **Vercel Hobby** (Fluid Compute provides 300s cron duration and 100 crons per project — Pro is not needed) + **Supabase Free** + **Resend** free email. The operator pays nothing for AI itself, since it's BYOK.
 
-**Hardening highlights (v1.3.0):**
+**Hardening highlights:**
 
 - **Bypass-proof signup gating** — open / invite-code / `.edu` modes enforced at the **database layer** (trigger on `auth.users`), so it covers the server route, direct signups, and OAuth.
 - **CAPTCHA** — Cloudflare Turnstile on signup.

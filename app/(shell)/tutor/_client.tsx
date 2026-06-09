@@ -1634,7 +1634,7 @@ export function TutorClient({ courses, sessions: initialSessions, hasApiKey = tr
                         </div>
                         <div className="flex flex-col items-start">
                           <span className="text-sm font-medium text-foreground">Deep Think</span>
-                          <span className="text-[11px] text-muted-foreground">Uses Opus 4.7 — slower but more thorough</span>
+                          <span className="text-[11px] text-muted-foreground">Uses Opus 4.8 — slower but more thorough</span>
                         </div>
                       </div>
                       <div className={`h-5 w-9 rounded-full transition-colors ${deepThink ? 'bg-violet-500' : 'bg-muted-foreground/30'}`}>
