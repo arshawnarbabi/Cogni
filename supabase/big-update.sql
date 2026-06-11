@@ -515,8 +515,13 @@ create policy "grade_items: own rows only" on public.grade_items
   for select using (auth.uid() = user_id);
 create index if not exists idx_grade_items_user_course on public.grade_items(user_id, course_id);
 -- One row per Canvas assignment per course (re-sync upserts on this).
+-- MUST be a full (non-partial) index: PostgREST's on_conflict can't carry an
+-- index predicate, and Postgres can't infer a partial unique index without one
+-- (42P10) — a partial index here silently broke every Canvas grade sync.
+-- Default NULLS DISTINCT still allows unlimited manual rows (NULL external_id).
+drop index if exists grade_items_external_uniq;
 create unique index if not exists grade_items_external_uniq
-  on public.grade_items(user_id, course_id, external_id) where external_id is not null;
+  on public.grade_items(user_id, course_id, external_id);
 
 -- Canvas connection (S5): one per user. The access token itself lives in the
 -- Vault (user_keys secret 'canvas_token'), never in a table column.
@@ -586,3 +591,78 @@ notify pgrst, 'reload schema';
 select
   (select count(*) from pg_indexes where indexname = 'topics_user_course_name_uniq') as topics_idx,
   (select count(*) from pg_indexes where indexname = 'assignments_user_course_name_due_uniq') as assignments_idx;
+
+-- ── Section 21: RLS lockdown (v2.1.1 audit H9) ──────────────────────────────
+-- FOR ALL policies let any signed-in user WRITE their own rows directly via
+-- PostgREST with the public anon key — bypassing every route-level control
+-- (suspension, rate limits, quotas, validation). All app writes go through
+-- the service role (bypasses RLS), so user policies need only SELECT.
+drop policy if exists "users: own row only" on public.users;
+create policy "users: own row only" on public.users
+  for select using (auth.uid() = user_id);
+drop policy if exists "professors: own rows only" on public.professors;
+create policy "professors: own rows only" on public.professors
+  for select using (auth.uid() = user_id);
+drop policy if exists "courses: own rows only" on public.courses;
+create policy "courses: own rows only" on public.courses
+  for select using (auth.uid() = user_id);
+drop policy if exists "topics: own rows only" on public.topics;
+create policy "topics: own rows only" on public.topics
+  for select using (auth.uid() = user_id);
+drop policy if exists "topic_mastery: own rows only" on public.topic_mastery;
+create policy "topic_mastery: own rows only" on public.topic_mastery
+  for select using (auth.uid() = user_id);
+drop policy if exists "flashcards: own rows only" on public.flashcards;
+create policy "flashcards: own rows only" on public.flashcards
+  for select using (auth.uid() = user_id);
+drop policy if exists "exams: own rows only" on public.exams;
+create policy "exams: own rows only" on public.exams
+  for select using (auth.uid() = user_id);
+drop policy if exists "assignments: own rows only" on public.assignments;
+create policy "assignments: own rows only" on public.assignments
+  for select using (auth.uid() = user_id);
+drop policy if exists "materials: own rows only" on public.materials;
+create policy "materials: own rows only" on public.materials
+  for select using (auth.uid() = user_id);
+drop policy if exists "inbox_items: own rows only" on public.inbox_items;
+create policy "inbox_items: own rows only" on public.inbox_items
+  for select using (auth.uid() = user_id);
+drop policy if exists "session_log: own rows only" on public.session_log;
+create policy "session_log: own rows only" on public.session_log
+  for select using (auth.uid() = user_id);
+drop policy if exists "session_messages: own rows only" on public.session_messages;
+create policy "session_messages: own rows only" on public.session_messages
+  for select using (auth.uid() = user_id);
+drop policy if exists "nudges: own rows only" on public.nudges;
+create policy "nudges: own rows only" on public.nudges
+  for select using (auth.uid() = user_id);
+drop policy if exists "wiki_versions: own rows only" on public.wiki_versions;
+create policy "wiki_versions: own rows only" on public.wiki_versions
+  for select using (auth.uid() = user_id);
+drop policy if exists "study_plan: own rows only" on public.study_plan;
+create policy "study_plan: own rows only" on public.study_plan
+  for select using (auth.uid() = user_id);
+drop policy if exists "mastery_history: own rows only" on public.mastery_history;
+create policy "mastery_history: own rows only" on public.mastery_history
+  for select using (auth.uid() = user_id);
+drop policy if exists "material_embeddings: own rows only" on public.material_embeddings;
+create policy "material_embeddings: own rows only" on public.material_embeddings
+  for select using (auth.uid() = user_id);
+drop policy if exists "owner_all" on public.course_files;
+create policy "owner_all" on public.course_files
+  for select using (auth.uid() = user_id);
+drop policy if exists "calendar_connections: own rows only" on public.calendar_connections;
+create policy "calendar_connections: own rows only" on public.calendar_connections
+  for select using (auth.uid() = user_id);
+drop policy if exists "Users manage own practice results" on public.practice_test_results;
+create policy "Users manage own practice results" on public.practice_test_results
+  for select using (auth.uid() = user_id);
+drop policy if exists "Users manage their own web suggestions" on public.course_web_suggestions;
+create policy "Users manage their own web suggestions" on public.course_web_suggestions
+  for select using (auth.uid() = user_id);
+drop policy if exists "daily_usage: own rows only" on public.daily_usage;
+create policy "daily_usage: own rows only" on public.daily_usage
+  for select using (auth.uid() = user_id);
+drop policy if exists "Users manage their own keys" on public.user_keys;
+create policy "Users manage their own keys" on public.user_keys
+  for select using (auth.uid() = user_id);

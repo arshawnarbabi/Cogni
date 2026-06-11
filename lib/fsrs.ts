@@ -3,7 +3,13 @@ import { dateKeyInTimeZone, addDaysToDateKey } from '@/lib/time'
 
 export { Rating }
 
-const f = fsrs()
+// Long-term-only scheduler: Cogni is one-session-per-day (dues are clamped to
+// tomorrow), so the default short-term learning steps ('1m','10m') can never be
+// honored — and because learning_steps was never persisted, a card rated Good
+// restarted step 0 every day and stayed in 'learning' FOREVER (intervals never
+// grew, the queue bloated). enable_short_term:false graduates cards straight to
+// 'review' with real day-scale intervals, which is the behavior the app assumes.
+const f = fsrs({ enable_short_term: false })
 
 export function newCardDefaults() {
   const card = createEmptyCard()
