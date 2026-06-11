@@ -45,3 +45,32 @@ export const badRequest = (code: string = 'bad_request') => apiError(code, 400)
  */
 export const serverError = (where: string, cause?: unknown) =>
   apiError('Something went wrong. Please try again.', 500, { where, cause })
+
+/**
+ * request.json() that can't 500: malformed/empty JSON bodies return null
+ * instead of throwing. Use as `const body = await readJson<T>(request); if
+ * (!body) return badRequest('invalid_json')` — a client sending garbage gets a
+ * 400, not an unhandled exception (audit #37: ~29 routes 500'd on bad JSON).
+ */
+export async function readJson<T>(request: Request): Promise<T | null> {
+  try {
+    const parsed = await request.json()
+    // JSON.parse can yield primitives/null; routes always expect an object.
+    return parsed !== null && typeof parsed === 'object' ? (parsed as T) : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * A finite number guard for API inputs: rejects NaN/Infinity (JSON `1e999`
+ * parses to Infinity) and enforces range. Returns null when invalid.
+ * numeric(p,s) columns overflow at their precision — pass `max` accordingly.
+ */
+export function finiteNumber(v: unknown, opts: { min?: number; max?: number; integer?: boolean } = {}): number | null {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return null
+  if (opts.integer && !Number.isInteger(v)) return null
+  if (opts.min !== undefined && v < opts.min) return null
+  if (opts.max !== undefined && v > opts.max) return null
+  return v
+}

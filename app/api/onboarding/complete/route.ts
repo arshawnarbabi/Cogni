@@ -3,7 +3,7 @@ import { initWiki } from '@/lib/wiki'
 import { requireOwnedProfessor } from '@/lib/authz'
 import { isUserSuspended, consumeAiQuota } from '@/lib/rate-limit'
 import { isValidTimeZone } from '@/lib/time'
-import { serverError } from '@/lib/api-error'
+import { serverError, readJson, badRequest } from '@/lib/api-error'
 import { LEGAL_VERSION } from '@/lib/legal'
 import { enqueueJob, kickJobs } from '@/lib/jobs'
 import { NextResponse } from 'next/server'
@@ -33,13 +33,16 @@ function inferFileType(filename: string): string {
 }
 
 export async function POST(request: Request) {
-  const { displayName, sessionLength, courses, syllabuses, timezone } = await request.json() as {
+  // readJson: malformed JSON is a 400, not an unhandled exception → 500.
+  const body = await readJson<{
     displayName: string
     sessionLength: number
     courses: CourseInput[]
     syllabuses: SyllabusInput[]
     timezone?: string
-  }
+  }>(request)
+  if (!body) return badRequest('invalid_json')
+  const { displayName, sessionLength, courses, syllabuses, timezone } = body
 
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
@@ -50,6 +53,34 @@ export async function POST(request: Request) {
 
   if (await isUserSuspended(user.id)) {
     return NextResponse.json({ error: 'Account suspended.' }, { status: 403 })
+  }
+
+  // Shape-check the payload before any DB writes — bad input must be a 400, not
+  // a TypeError/DB-error 500. sessionLength uses the same 25/45/90 enum the
+  // settings route enforces (it lands in users.session_length_preference); the
+  // array caps bound the per-request DB write fan-out below.
+  if (![25, 45, 90].includes(sessionLength)) {
+    return NextResponse.json({ error: 'Invalid sessionLength' }, { status: 400 })
+  }
+  const MAX_ONBOARDING_ITEMS = 20
+  if (!Array.isArray(courses) || courses.length > MAX_ONBOARDING_ITEMS) {
+    return badRequest('invalid_courses')
+  }
+  if (!Array.isArray(syllabuses) || syllabuses.length > MAX_ONBOARDING_ITEMS) {
+    return badRequest('invalid_syllabuses')
+  }
+  for (const c of courses) {
+    // names ≤200 chars (app-wide convention); non-string fields would otherwise
+    // throw on .trim() below.
+    if (!c || typeof c.name !== 'string' || !c.name.trim() || c.name.length > 200
+        || typeof c.professorName !== 'string' || !c.professorName.trim() || c.professorName.length > 200) {
+      return badRequest('invalid_courses')
+    }
+  }
+  for (const s of syllabuses) {
+    if (!s || typeof s.storagePath !== 'string' || typeof s.fileName !== 'string') {
+      return badRequest('invalid_syllabuses')
+    }
   }
 
   const service = createServiceClient()
@@ -159,7 +190,12 @@ export async function POST(request: Request) {
       .single()
 
     if (materialError) {
-      console.error('[onboarding] material insert failed', { file: syl.fileName, error: materialError })
+      // 23505 = materials_user_filename_active_uniq: a double-submit/retry of
+      // /complete already registered this syllabus (and enqueued its profiler
+      // job) — skipping quietly makes the whole route idempotent (#7).
+      if (materialError.code !== '23505') {
+        console.error('[onboarding] material insert failed', { file: syl.fileName, error: materialError })
+      }
     }
 
     if (material) {

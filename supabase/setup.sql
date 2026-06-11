@@ -1868,3 +1868,50 @@ create policy "course_grade_manual: own rows only" on public.course_grade_manual
   for select using (auth.uid() = user_id);
 
 notify pgrst, 'reload schema';
+
+-- ── Section 22: Race-safety constraints (v2.1.1 audit #4/#5/#26/#27/#28) ─────
+-- Check-then-act dedup in app code is racy under concurrent requests; these
+-- constraints make the DB the arbiter. Dedup passes run first: a unique index
+-- cannot be created while violating rows exist.
+
+-- #5/#27: one QUEUED job per (user, kind, subject/course) — concurrent uploads
+-- enqueued duplicate flashcards/distill jobs (double decks, double AI spend).
+with ranked as (
+  select job_id, row_number() over (
+    partition by user_id, kind, coalesce(subject_id::text, ''), coalesce(payload->>'courseId', '')
+    order by created_at
+  ) rn from public.jobs where status = 'queued'
+)
+delete from public.jobs where job_id in (select job_id from ranked where rn > 1);
+create unique index if not exists jobs_queued_dedup_uniq
+  on public.jobs (user_id, kind, coalesce(subject_id::text, ''), coalesce(payload->>'courseId', ''))
+  where status = 'queued';
+
+-- #26: one exam per (user, course, date) — the profiler's check-then-insert
+-- raced under concurrent profile jobs, duplicating exam rows (and with them
+-- readiness cards, scheduler urgency and calendar entries).
+with ranked as (
+  select exam_id, row_number() over (
+    partition by user_id, course_id, date order by created_at
+  ) rn from public.exams
+)
+delete from public.exams where exam_id in (select exam_id from ranked where rn > 1);
+create unique index if not exists exams_user_course_date_uniq
+  on public.exams(user_id, course_id, date);
+
+-- #4: the inbox filename dedup check raced double-submits — both requests saw
+-- no existing row and both inserted (two materials, two classifications billed).
+-- Partial: a 'failed' material must not block the user's retry re-upload.
+with ranked as (
+  select material_id, row_number() over (
+    partition by user_id, filename order by uploaded_at
+  ) rn from public.materials where processing_status <> 'failed'
+)
+delete from public.materials where material_id in (select material_id from ranked where rn > 1);
+create unique index if not exists materials_user_filename_active_uniq
+  on public.materials(user_id, filename) where processing_status <> 'failed';
+
+-- #28: serverless-safe per-user mutex for the scheduler (TTL'd claim column) —
+-- concurrent runs interleaved the calendar delete-then-create, stacking
+-- duplicate study blocks in Google Calendar.
+alter table public.users add column if not exists scheduler_lock_at timestamptz;

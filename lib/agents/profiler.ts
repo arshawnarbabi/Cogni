@@ -686,7 +686,13 @@ export async function runProfiler(
         })
 
       if (examRowsToInsert.length > 0) {
-        const { error: examInsertError } = await service.from('exams').insert(examRowsToInsert)
+        // Upsert-ignore on (user_id, course_id, date): the date snapshot above
+        // is check-then-act — two concurrent profile jobs for the same course
+        // both saw "no exams" and both inserted, duplicating every exam row.
+        const { error: examInsertError } = await service.from('exams').upsert(examRowsToInsert, {
+          onConflict: 'user_id,course_id,date',
+          ignoreDuplicates: true,
+        })
         if (examInsertError) console.error(`${tag} exam batch insert failed`, examInsertError)
       }
     }

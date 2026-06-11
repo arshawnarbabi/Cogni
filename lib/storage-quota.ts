@@ -12,7 +12,11 @@ async function bucketBytes(service: Service, bucket: string, prefix: string): Pr
   let total = 0
   let offset = 0
   for (;;) {
-    const { data } = await service.storage.from(bucket).list(prefix, { limit: 1000, offset })
+    const { data, error } = await service.storage.from(bucket).list(prefix, { limit: 1000, offset })
+    // A failed list must THROW, not undercount: returning a partial total made
+    // the quota check pass silently (fail-open) — the one user it exists to
+    // stop is exactly the one who'd keep uploading through the blip.
+    if (error) throw new Error(`storage list failed (${bucket}/${prefix}): ${error.message}`)
     if (!data?.length) break
     for (const f of data as Array<{ id?: string | null; name: string; metadata?: { size?: number } }>) {
       if (f.id) total += f.metadata?.size ?? 0 // a file

@@ -3,6 +3,7 @@ import { getUserApiKey } from '@/lib/vault'
 import { requireOwnedProfessor } from '@/lib/authz'
 import { isUserSuspended, consumeAiQuota } from '@/lib/rate-limit'
 import { hasExpectedFileSignature } from '@/lib/file-validation'
+import { wouldExceedStorageLimit } from '@/lib/storage-quota'
 import { ICON_NAMES } from '@/lib/course-icon-names'
 import { serverError } from '@/lib/api-error'
 import { enqueueJob, kickJobs } from '@/lib/jobs'
@@ -66,6 +67,20 @@ export async function POST(request: Request) {
 
   if (!name || !professorName) {
     return NextResponse.json({ error: 'Course name and professor name are required.' }, { status: 400 })
+  }
+
+  // Syllabus limits — checked BEFORE any DB writes so an oversized/over-quota
+  // upload can't spam course rows. Mirrors inbox/upload: 25 MB per-file cap plus
+  // the per-user storage ceiling (protects the shared free-tier project) — this
+  // route previously enforced neither, allowing unbounded storage growth.
+  if (syllabus && syllabus.size > 0) {
+    const MAX_UPLOAD_BYTES = 25 * 1024 * 1024 // 25 MB
+    if (syllabus.size > MAX_UPLOAD_BYTES) {
+      return NextResponse.json({ error: 'Syllabus too large (max 25 MB).' }, { status: 413 })
+    }
+    if (await wouldExceedStorageLimit(user.id, syllabus.size)) {
+      return NextResponse.json({ error: 'Storage limit reached. Delete some materials to free up space.' }, { status: 413 })
+    }
   }
 
   const service = createServiceClient()

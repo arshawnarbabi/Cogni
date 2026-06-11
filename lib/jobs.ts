@@ -51,6 +51,10 @@ export async function enqueueJob(
     .select('job_id')
     .single()
   if (error) {
+    // 23505 = jobs_queued_dedup_uniq: an identical job is already queued
+    // (concurrent enqueue race) — the work will happen exactly once, so this
+    // is success-shaped, not an error.
+    if (error.code === '23505') return null
     console.error('[jobs] enqueue failed', error)
     Sentry.captureException(error, { tags: { surface: 'jobs.enqueue', kind } })
     return null

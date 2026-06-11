@@ -22,6 +22,7 @@ import { keyFailureKind, markKeyStatus } from '@/lib/ai/call'
 import { compactHistory, distillPreviousSessionIfNeeded } from '@/lib/agents/memory'
 import { armDistillJob, kickJobs } from '@/lib/jobs'
 import { recordUsage } from '@/lib/usage'
+import { readJson, badRequest } from '@/lib/api-error'
 import { log } from '@/lib/log'
 import Anthropic from '@anthropic-ai/sdk'
 import { NextResponse } from 'next/server'
@@ -88,7 +89,8 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
-  const body = await request.json() as {
+  // readJson: malformed JSON is a 400, not an unhandled exception → 500.
+  const body = await readJson<{
     courseId: string
     courseName: string
     message: string
@@ -100,7 +102,8 @@ export async function POST(request: Request) {
     essayContent?: string
     assistanceLevel?: 'feedback' | 'suggest' | 'assist'
     historyCutoff?: number
-  }
+  }>(request)
+  if (!body) return badRequest('invalid_json')
 
   const {
     courseId,
@@ -118,6 +121,15 @@ export async function POST(request: Request) {
 
   if (!courseId || !message?.trim()) {
     return NextResponse.json({ error: 'Missing courseId or message' }, { status: 400 })
+  }
+
+  // `mode` feeds the session_log CHECK constraint and the MODE_INSTRUCTIONS
+  // prompt lookup — an unlisted value 500s in createSession (unhandled throw)
+  // or interpolates 'undefined' into the system prompt. Whitelist before any
+  // DB work.
+  const VALID_MODES: readonly TutorMode[] = ['answer', 'teach', 'focus', 'homework']
+  if (!VALID_MODES.includes(mode)) {
+    return badRequest('invalid_mode')
   }
 
   const supabase = await createClient()

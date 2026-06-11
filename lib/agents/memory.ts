@@ -131,7 +131,8 @@ export async function distillSession(userId: string, sessionId: string): Promise
     .maybeSingle()
   if (!session) return false
 
-  // Idempotency: one summary per session.
+  // Idempotency fast-path: one summary per session (the atomic claim that
+  // actually arbitrates concurrent runs happens just before the AI call).
   const { data: existing } = await service
     .from('session_summaries')
     .select('summary_id')
@@ -165,6 +166,28 @@ export async function distillSession(userId: string, sessionId: string): Promise
   // until they delete it).
   if (userRow?.memory_paused === true) return false
 
+  // Atomic claim (#27): the SELECT above is check-then-act — two concurrent
+  // distills both saw "no summary" and both paid the AI call. Insert a
+  // placeholder row first: unique(session_id) lets exactly one run win; the
+  // loser gets 23505 and aborts. Any failure after this releases the claim so
+  // the session can distill on a later retry instead of being blocked forever.
+  const { error: claimError } = await service.from('session_summaries').insert({
+    user_id: userId,
+    session_id: sessionId,
+    course_id: session.course_id,
+    summary: '',
+    message_count: 0,
+  })
+  if (claimError) {
+    if (claimError.code !== '23505') console.error('[memory] distill claim failed', claimError)
+    return false
+  }
+  const releaseClaim = async () => {
+    await service.from('session_summaries').delete()
+      .eq('session_id', sessionId).eq('user_id', userId).eq('summary', '')
+  }
+
+  try {
   const client = new Anthropic({ apiKey })
   const response = await withRetry(() => client.messages.create({
     model: 'claude-haiku-4-5-20251001',
@@ -203,6 +226,7 @@ Rules: be specific and factual — only what the transcript supports. Empty arra
   const distilled = parseDistilled(raw)
   if (!distilled) {
     console.error('[memory] distill parse failed for session', sessionId)
+    await releaseClaim()
     return false
   }
 
@@ -217,19 +241,18 @@ Rules: be specific and factual — only what the transcript supports. Empty arra
     ? Math.max(0, Math.round((new Date(last).getTime() - new Date(first).getTime()) / 1000))
     : null
 
-  const { error: summaryError } = await service.from('session_summaries').upsert({
-    user_id: userId,
-    session_id: sessionId,
-    course_id: session.course_id,
+  // Fill the claim row (an upsert-ignore would skip it — the row exists).
+  const { error: summaryError } = await service.from('session_summaries').update({
     summary: distilled.summary,
     confusions: distilled.confusions,
     understood: distilled.understood,
     preferences: distilled.preferences,
     topics_discussed: uniqueTopicIds.length > 0 ? uniqueTopicIds : null,
     message_count: msgs.length,
-  }, { onConflict: 'session_id', ignoreDuplicates: true })
+  }).eq('session_id', sessionId).eq('user_id', userId)
   if (summaryError) {
-    console.error('[memory] session_summaries upsert failed', summaryError)
+    console.error('[memory] session_summaries update failed', summaryError)
+    await releaseClaim()
     return false
   }
 
@@ -313,6 +336,12 @@ Rules: be specific and factual — only what the transcript supports. Empty arra
   }
 
   return true
+  } catch (e) {
+    // Don't strand the session: an empty claim row would read as "already
+    // distilled" forever. Release it so a later retry can do the work.
+    await releaseClaim()
+    throw e
+  }
 }
 
 // ── In-session history compaction (M6) ──────────────────────────────────────

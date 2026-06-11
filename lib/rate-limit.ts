@@ -24,6 +24,11 @@ export type AiAction = keyof typeof DAILY_LIMITS
 // the Tutor — the most-used AI route — entirely uncapped.
 export const DEFAULT_TUTOR_DAILY_LIMIT = 100
 
+// Ceiling on the SELF-SET tutor limit (settings/tutor-limit). Without an upper
+// bound a user could PATCH a huge value and recreate the uncapped state the
+// default above was added to close.
+export const MAX_TUTOR_DAILY_LIMIT = 500
+
 /** Increment the user's daily counter for `action`; true if still within `limit`. Fails open on infra error. */
 async function consumeDaily(userId: string, action: string, limit: number): Promise<boolean> {
   const service = createServiceClient()
