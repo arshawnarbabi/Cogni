@@ -279,8 +279,20 @@ export function InboxClient({ items: initialItems, courses }: { items: InboxItem
   }
 
   async function dismissItem(itemId: string) {
+    // Optimistic removal — revert if the server delete fails so the item
+    // doesn't silently reappear on the next visit.
+    const snapshot = items
     setItems(prev => prev.filter(i => i.inbox_item_id !== itemId))
-    await fetch(`/api/inbox/items/${itemId}`, { method: 'DELETE' })
+    try {
+      const res = await fetch(`/api/inbox/items/${itemId}`, { method: 'DELETE' })
+      if (!res.ok) {
+        setItems(snapshot)
+        toast.error('Could not dismiss the item. Try again.')
+      }
+    } catch {
+      setItems(snapshot)
+      toast.error('Could not dismiss the item. Try again.')
+    }
   }
 
   async function confirmDueDate(stagedId: string, date: string) {
@@ -324,16 +336,28 @@ export function InboxClient({ items: initialItems, courses }: { items: InboxItem
   }
 
   async function assignItem(itemId: string, courseId: string) {
+    // Optimistic assignment — revert if the PATCH fails so the UI never shows
+    // an assignment the server never recorded.
+    const snapshot = items
     setItems(prev => prev.map(i =>
       i.inbox_item_id === itemId
         ? { ...i, classification_status: 'classified', course_id: courseId, courses: courses.find(c => c.course_id === courseId) ? { name: courses.find(c => c.course_id === courseId)!.name } : i.courses }
         : i
     ))
-    await fetch(`/api/inbox/items/${itemId}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ courseId }),
-    })
+    try {
+      const res = await fetch(`/api/inbox/items/${itemId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ courseId }),
+      })
+      if (!res.ok) {
+        setItems(snapshot)
+        toast.error('Could not assign the item to that course. Try again.')
+      }
+    } catch {
+      setItems(snapshot)
+      toast.error('Could not assign the item to that course. Try again.')
+    }
   }
 
   async function processAll() {

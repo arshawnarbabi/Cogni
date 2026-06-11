@@ -2,23 +2,31 @@ import { createClient, createServiceClient } from '@/lib/supabase/server'
 import { setUserSecret } from '@/lib/vault'
 import { NextResponse } from 'next/server'
 import { NextRequest } from 'next/server'
+import { timingSafeEqual } from 'node:crypto'
 
 export async function GET(request: NextRequest) {
   const url = new URL(request.url)
   const code = url.searchParams.get('code')
-  const stateUserId = url.searchParams.get('state')
+  const state = url.searchParams.get('state')
 
-  if (!code || !stateUserId) {
+  if (!code || !state) {
     return NextResponse.redirect(`${process.env.NEXT_PUBLIC_APP_URL}/settings?calendar=error`)
   }
 
-  // Verify the OAuth `state` matches the caller's authenticated session.
-  // Google redirects back into the user's browser with their Supabase cookie;
-  // if `state` doesn't match the session we reject — this prevents an attacker
-  // from forging a callback that links their Google account to someone else's user row.
+  // H10: `state` is a per-flow random nonce set by /connect in an HttpOnly
+  // cookie — only the browser that STARTED the flow can complete it, so a
+  // forged callback URL (attacker's auth code, victim's session) is rejected.
+  // The session check below still binds the link to the signed-in user.
+  const stateCookie = request.cookies.get('calendar_oauth_state')?.value ?? ''
+  const a = Buffer.from(state)
+  const b = Buffer.from(stateCookie)
+  if (!stateCookie || a.length !== b.length || !timingSafeEqual(a, b)) {
+    return NextResponse.redirect(`${process.env.NEXT_PUBLIC_APP_URL}/settings?calendar=error`)
+  }
+
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
-  if (!user || user.id !== stateUserId) {
+  if (!user) {
     return NextResponse.redirect(`${process.env.NEXT_PUBLIC_APP_URL}/settings?calendar=error`)
   }
 

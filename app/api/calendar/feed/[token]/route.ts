@@ -13,7 +13,10 @@ export const dynamic = 'force-dynamic'
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 function icsEscape(s: string): string {
-  return s.replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n')
+  // \r\n|[\r\n] (not \r?\n) — a BARE carriage return slipped through and
+  // lenient ICS parsers split on it, letting a hostile assignment/course name
+  // inject whole properties or events into the subscribed calendar (H14).
+  return s.replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\r\n|[\r\n]/g, '\\n')
 }
 
 // RFC 5545 §3.1: content lines longer than 75 octets MUST be folded

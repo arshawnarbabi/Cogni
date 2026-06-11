@@ -48,6 +48,7 @@ function StatusChip({ status }: { status: string }) {
 function MaterialRow({ material, onDeleted }: { material: Material; onDeleted: () => void }) {
   const [confirming, setConfirming] = useState(false)
   const [deleting, setDeleting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   const date = new Date(material.uploaded_at).toLocaleDateString(undefined, {
     month: 'short', day: 'numeric', year: 'numeric',
@@ -56,8 +57,20 @@ function MaterialRow({ material, onDeleted }: { material: Material; onDeleted: (
 
   async function handleDelete() {
     setDeleting(true)
-    await fetch(`/api/materials/${material.material_id}`, { method: 'DELETE' })
-    onDeleted()
+    setError(null)
+    try {
+      const res = await fetch(`/api/materials/${material.material_id}`, { method: 'DELETE' })
+      if (!res.ok) {
+        setError('Failed to delete')
+        return
+      }
+      // Only remove the row from the list once the server confirmed the delete
+      onDeleted()
+    } catch {
+      setError('Failed to delete')
+    } finally {
+      setDeleting(false)
+    }
   }
 
   return (
@@ -69,6 +82,7 @@ function MaterialRow({ material, onDeleted }: { material: Material; onDeleted: (
           <span className="text-xs text-muted-foreground">{tierLabel} · {date}</span>
         </div>
         <StatusChip status={material.processing_status} />
+        {error && <span className="text-[11px] text-red-500">{error}</span>}
         <button
           onClick={() => setConfirming(v => !v)}
           aria-label="Delete material"

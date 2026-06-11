@@ -8,6 +8,7 @@ import { consumeAiQuota } from '@/lib/rate-limit'
 import { extractText, buildVisualBlock, extractContentFromVision } from '@/lib/extract-text'
 import { withRetry } from '@/lib/ai/call'
 import { enqueueJob, kickJobs } from '@/lib/jobs'
+import { recordUsage } from '@/lib/usage'
 
 // Embedding text rides in the job payload (the vision-extracted transcription is
 // not cheaply re-derivable in the worker). Cap to bound jsonb row size.
@@ -176,6 +177,7 @@ export async function classifyMaterial(
         }),
         { label: 'inbox.classify.vision', keyHealth: { userId, provider: 'anthropic' } },
       )
+      recordUsage(userId, 'inbox', 'claude-haiku-4-5-20251001', visionMessage.usage)
       rawResponse = visionMessage.content[0].type === 'text' ? visionMessage.content[0].text : ''
     } catch (e) {
       console.error('[inbox] vision classification failed', e)
@@ -193,6 +195,7 @@ export async function classifyMaterial(
       }),
       { label: 'inbox.classify', keyHealth: { userId, provider: 'anthropic' } },
     )
+    recordUsage(userId, 'inbox', 'claude-haiku-4-5-20251001', message.usage)
     rawResponse = message.content[0].type === 'text' ? message.content[0].text : ''
   }
 
@@ -204,16 +207,16 @@ export async function classifyMaterial(
     ? rawCourseId
     : null
 
-  // Auto-dismiss context hints — they're not course materials
+  // Context hints are left UNASSIGNED, not deleted (#12): the old path hard-
+  // deleted the file + rows on a single unconfirmed Haiku judgment over
+  // untrusted content — a misread (or a prompt-injected doc) destroyed real
+  // material irreversibly. Unassigned keeps it in the inbox with the existing
+  // one-click dismiss/assign affordances; the user makes the final call.
   if (isContextHint) {
-    await service.from('inbox_items').delete().eq('material_id', materialId).eq('user_id', userId)
-    await service.from('materials').delete().eq('material_id', materialId).eq('user_id', userId)
-    await service.storage.from('materials').remove([storagePath]).catch(() => {})
-    await appendToLog(userId, `Inbox: "${filename}" auto-dismissed as context hint`)
-    return { courseId: null, tier: 4, status: 'classified', isHomework: false, dueDate: null, dismissed: true }
+    await appendToLog(userId, `Inbox: "${filename}" looks like a context note — left in your inbox to dismiss or assign`)
   }
 
-  const classificationStatus = courseId ? 'classified' : 'unassigned'
+  const classificationStatus = courseId && !isContextHint ? 'classified' : 'unassigned'
 
   await service
     .from('materials')
@@ -269,7 +272,7 @@ export async function classifyMaterial(
   // For vision-processed files, extract full text content for RAG
   let ragContent = fullContent
   if (needsVision && visualBlock && classificationStatus === 'classified') {
-    const visionText = await extractContentFromVision(client, visualBlock)
+    const visionText = await extractContentFromVision(client, visualBlock, userId)
     if (visionText.length > 100) ragContent = visionText
   }
 

@@ -57,6 +57,11 @@ export function FlashcardViewer({ cards, topic, onClose, onComplete }: Props) {
   const [ratedMap, setRatedMap] = useState<Record<number, number>>({})
   const [submitting, setSubmitting] = useState(false)
   const [done, setDone] = useState(false)
+  // Guards the whole rate→auto-advance window. The ref is checked synchronously
+  // so a second tap before re-render can't double-advance or fire onComplete twice.
+  const [advancing, setAdvancing] = useState(false)
+  const advancingRef = useRef(false)
+  const advanceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // Reset when tutor regenerates the deck (new cards array from parent).
   const lastCardsRef = useRef(cards)
@@ -67,6 +72,10 @@ export function FlashcardViewer({ cards, topic, onClose, onComplete }: Props) {
       setFlipped(false)
       setDirection(1)
       setRatedMap({})
+      // Cancel any pending auto-advance from the previous deck
+      if (advanceTimerRef.current) clearTimeout(advanceTimerRef.current)
+      advancingRef.current = false
+      setAdvancing(false)
     }
   }, [cards])
 
@@ -89,7 +98,9 @@ export function FlashcardViewer({ cards, topic, onClose, onComplete }: Props) {
   }
 
   async function handleRate(rating: 1 | 2 | 3 | 4) {
-    if (submitting) return
+    if (submitting || advancingRef.current) return
+    advancingRef.current = true
+    setAdvancing(true)
     setRatedMap(prev => ({ ...prev, [index]: rating }))
     if (card.card_id) {
       setSubmitting(true)
@@ -113,7 +124,9 @@ export function FlashcardViewer({ cards, topic, onClose, onComplete }: Props) {
       setSubmitting(false)
     }
     // Auto-advance after rating, or show done screen on last card
-    setTimeout(() => {
+    advanceTimerRef.current = setTimeout(() => {
+      advancingRef.current = false
+      setAdvancing(false)
       if (index < cards.length - 1) {
         setDirection(1)
         setFlipped(false)
@@ -256,7 +269,7 @@ export function FlashcardViewer({ cards, topic, onClose, onComplete }: Props) {
                 <button
                   key={r.value}
                   onClick={() => handleRate(r.value)}
-                  disabled={submitting}
+                  disabled={submitting || advancing}
                   className={`flex flex-1 items-center justify-center rounded-xl py-2.5 text-sm font-semibold transition-all disabled:opacity-50 ${
                     ratedMap[index] === r.value
                       ? r.color + ' ring-2 ring-offset-1 ring-current'

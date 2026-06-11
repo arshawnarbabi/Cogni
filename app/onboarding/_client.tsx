@@ -145,29 +145,27 @@ export default function OnboardingClient({ googleName, calendarConnected }: { go
   const router = useRouter()
   const supabase = createClient()
 
-  const saved = typeof window !== 'undefined' ? loadSaved() : null
-
-  const [step, setStep] = useState<Step>((saved?.step ?? 0) as Step)
+  const [step, setStep] = useState<Step>(0)
   const [direction, setDirection] = useState(1)
   const [loading, setLoading] = useState(false)
+  // True once saved progress has been restored from localStorage (post-mount)
+  const [hydrated, setHydrated] = useState(false)
 
   // Step 0 — Name
-  const [name, setName] = useState(saved?.name ?? googleName)
+  const [name, setName] = useState(googleName)
 
   // Step 1 — API Keys
   const [apiKey, setApiKey] = useState('')
-  const [apiKeySubmitted, setApiKeySubmitted] = useState(saved?.apiKeySubmitted ?? false)
+  const [apiKeySubmitted, setApiKeySubmitted] = useState(false)
   const [openaiKey, setOpenaiKey] = useState('')
 
   // Step 2 — Session Length
-  const [sessionLength, setSessionLength] = useState<25 | 45 | 90>(saved?.sessionLength ?? 45)
+  const [sessionLength, setSessionLength] = useState<25 | 45 | 90>(45)
 
   // Step 3 — Courses
-  const [courses, setCourses] = useState<CourseEntry[]>(
-    saved?.courses?.length
-      ? saved.courses
-      : [{ id: crypto.randomUUID(), name: '', professorName: '', existingProfessor: null }],
-  )
+  const [courses, setCourses] = useState<CourseEntry[]>(() => [
+    { id: crypto.randomUUID(), name: '', professorName: '', existingProfessor: null },
+  ])
   const [professorSuggestions, setProfessorSuggestions] = useState<
     Record<string, { professor_id: string; name: string }[]>
   >({})
@@ -176,12 +174,28 @@ export default function OnboardingClient({ googleName, calendarConnected }: { go
   // Step 4 — Syllabuses (files can't be persisted — entries are recreated from courses)
   const [syllabuses, setSyllabuses] = useState<SyllabusEntry[]>([])
 
-  // Persist progress to localStorage whenever key state changes
+  // Restore saved progress after mount — reading localStorage during render
+  // makes the server and client first renders disagree (hydration error).
   useEffect(() => {
-    if (step >= 6) return
+    const saved = loadSaved()
+    if (saved) {
+      setStep((saved.step ?? 0) as Step)
+      setName(saved.name || googleName)
+      setSessionLength(saved.sessionLength ?? 45)
+      if (saved.courses?.length) setCourses(saved.courses)
+      setApiKeySubmitted(saved.apiKeySubmitted ?? false)
+    }
+    setHydrated(true)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Persist progress to localStorage whenever key state changes — but never
+  // before hydration, or the defaults would clobber the saved progress.
+  useEffect(() => {
+    if (!hydrated || step >= 6) return
     const state: SavedState = { step, name, sessionLength, courses, apiKeySubmitted }
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state))
-  }, [step, name, sessionLength, courses, apiKeySubmitted])
+  }, [hydrated, step, name, sessionLength, courses, apiKeySubmitted])
 
   // Sync syllabuses when courses change
   useEffect(() => {
@@ -225,18 +239,25 @@ export default function OnboardingClient({ googleName, calendarConnected }: { go
         return
       }
       setLoading(true)
-      const res = await fetch('/api/settings/api-key', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ key: trimmed }),
-      })
-      const data = await res.json()
-      setLoading(false)
-      if (!res.ok) {
-        toast.error(data.error ?? 'Failed to save Anthropic key.')
+      try {
+        const res = await fetch('/api/settings/api-key', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ key: trimmed }),
+        })
+        const data = await res.json().catch(() => ({} as { error?: string }))
+        if (!res.ok) {
+          toast.error(data.error ?? 'Failed to save Anthropic key.')
+          return
+        }
+        setApiKeySubmitted(true)
+      } catch {
+        // Network failure — recover the button instead of sticking on 'Saving…'
+        toast.error('Failed to save Anthropic key. Check your connection and try again.')
         return
+      } finally {
+        setLoading(false)
       }
-      setApiKeySubmitted(true)
     }
 
     // Save OpenAI key if provided (best-effort — optional)
@@ -246,7 +267,7 @@ export default function OnboardingClient({ googleName, calendarConnected }: { go
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ key: 'openai_key', value: openaiTrimmed }),
-      })
+      }).catch(() => {})
     }
 
     advance()
@@ -299,61 +320,70 @@ export default function OnboardingClient({ googleName, calendarConnected }: { go
   // ── Final completion ─────────────────────────────────────────────────────
 
   async function runCompletion() {
-    const {
-      data: { user },
-    } = await supabase.auth.getUser()
-    if (!user) {
-      toast.error('Session expired. Please sign in again.')
-      router.push('/auth')
-      return
-    }
-
-    // Upload syllabus files to Supabase Storage
-    const syllabusUploads: { courseTemp: number; storagePath: string; fileName: string }[] = []
-
-    for (let i = 0; i < courses.length; i++) {
-      const syl = syllabuses.find(s => s.courseId === courses[i].id)
-      if (!syl?.file) continue
-
-      const form = new FormData()
-      form.append('file', syl.file)
-      const res = await fetch('/api/onboarding/upload-syllabus', { method: 'POST', body: form })
-      if (!res.ok) {
-        console.warn('Syllabus upload failed:', await res.text())
-        continue
+    try {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser()
+      if (!user) {
+        toast.error('Session expired. Please sign in again.')
+        router.push('/auth')
+        return
       }
-      const { storagePath, fileName } = await res.json()
-      syllabusUploads.push({ courseTemp: i, storagePath, fileName })
+
+      // Upload syllabus files to Supabase Storage
+      const syllabusUploads: { courseTemp: number; storagePath: string; fileName: string }[] = []
+
+      for (let i = 0; i < courses.length; i++) {
+        const syl = syllabuses.find(s => s.courseId === courses[i].id)
+        if (!syl?.file) continue
+
+        const form = new FormData()
+        form.append('file', syl.file)
+        const res = await fetch('/api/onboarding/upload-syllabus', { method: 'POST', body: form })
+        if (!res.ok) {
+          console.warn('Syllabus upload failed:', await res.text())
+          continue
+        }
+        const { storagePath, fileName } = await res.json()
+        syllabusUploads.push({ courseTemp: i, storagePath, fileName })
+      }
+
+      // Write all records via onboarding complete route
+      const res = await fetch('/api/onboarding/complete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          displayName: name,
+          sessionLength,
+          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+          courses: courses.map((c, i) => ({
+            tempIndex: i,
+            name: c.name,
+            professorName: c.professorName,
+            existingProfessorId: c.existingProfessor?.professor_id ?? null,
+          })),
+          syllabuses: syllabusUploads,
+        }),
+      })
+
+      if (!res.ok) {
+        // Body may not be JSON (e.g. proxy HTML on a 502)
+        const { error } = await res.json().catch(() => ({} as { error?: string }))
+        toast.error(error ?? 'Something went wrong. Please try again.')
+        setStep(0)
+        return
+      }
+
+      localStorage.removeItem(STORAGE_KEY)
+      await new Promise(r => setTimeout(r, 1200))
+      router.push('/today')
+    } catch {
+      // Network/parse failure — drop back to the last step so 'Get started'
+      // retries instead of leaving the spinner running forever.
+      toast.error('Something went wrong finishing setup. Please try again.')
+      setDirection(-1)
+      setStep(5)
     }
-
-    // Write all records via onboarding complete route
-    const res = await fetch('/api/onboarding/complete', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        displayName: name,
-        sessionLength,
-        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-        courses: courses.map((c, i) => ({
-          tempIndex: i,
-          name: c.name,
-          professorName: c.professorName,
-          existingProfessorId: c.existingProfessor?.professor_id ?? null,
-        })),
-        syllabuses: syllabusUploads,
-      }),
-    })
-
-    if (!res.ok) {
-      const { error } = await res.json()
-      toast.error(error ?? 'Something went wrong. Please try again.')
-      setStep(0)
-      return
-    }
-
-    localStorage.removeItem(STORAGE_KEY)
-    await new Promise(r => setTimeout(r, 1200))
-    router.push('/today')
   }
 
   useEffect(() => {

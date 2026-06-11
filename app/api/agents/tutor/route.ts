@@ -2,7 +2,7 @@ import { createClient, createServiceClient } from '@/lib/supabase/server'
 import { getUserApiKey } from '@/lib/vault'
 import { dateKeyInTimeZone, startOfLocalDayUtc } from '@/lib/time'
 import { DEFAULT_TUTOR_DAILY_LIMIT } from '@/lib/rate-limit'
-import { getAppConfig } from '@/lib/app-config'
+import { getAppConfig, auditLog } from '@/lib/app-config'
 import {
   buildTutorSystemPrompt,
   getOrCreateSession,
@@ -21,6 +21,9 @@ import { applyMasteryEvidence, resolveTopicByName, LEARNING_RATES } from '@/lib/
 import { keyFailureKind, markKeyStatus } from '@/lib/ai/call'
 import { compactHistory, distillPreviousSessionIfNeeded } from '@/lib/agents/memory'
 import { armDistillJob, kickJobs } from '@/lib/jobs'
+import { moderateImage } from '@/lib/moderation'
+import { getUserKey } from '@/lib/user-keys'
+import { assignNewCardDueDates } from '@/lib/agents/flashcard'
 import { recordUsage } from '@/lib/usage'
 import { readJson, badRequest } from '@/lib/api-error'
 import { log } from '@/lib/log'
@@ -164,6 +167,21 @@ export async function POST(request: Request) {
   }
   if (totalAttachmentBytes > MAX_TOTAL_BYTES) {
     return NextResponse.json({ error: 'attachment_too_large' }, { status: 413 })
+  }
+
+  // #31: the AUP commits to screening uploaded images — the inbox path enforced
+  // it but tutor chat (which invites photographed homework) forwarded images to
+  // Anthropic unscreened. Same gate, same 422, mirroring inbox/upload.
+  const imageAttachments = attachments.filter(a => a.type.startsWith('image/'))
+  if (imageAttachments.length > 0) {
+    const openaiKey = await getUserKey(user.id, 'openai_key')
+    for (const att of imageAttachments) {
+      const mod = await moderateImage(openaiKey, { base64: att.data, mimeType: att.type })
+      if (mod.flagged) {
+        await auditLog('moderation_block', { actor: user.id, subjectUserId: user.id, detail: { surface: 'tutor_attachment', categories: mod.categories } })
+        return NextResponse.json({ error: 'content_rejected' }, { status: 422 })
+      }
+    }
   }
 
   // Rate limit check
@@ -623,8 +641,12 @@ export async function POST(request: Request) {
                 try {
                   const saveSvc = createServiceClient()
                   const defaults = newCardDefaults()
+                  // #11: pace through the NEW_CARDS_PER_DAY budget like every
+                  // other deck source — newCardDefaults() alone lands all cards
+                  // due-today, letting tutor decks bypass the global pacing.
+                  const dueDates = await assignNewCardDueDates(saveSvc, user.id, input.cards.length, userRow?.timezone ?? 'UTC')
                   const { data: inserted, error: insertError } = await saveSvc.from('flashcards').insert(
-                    input.cards.map(card => ({
+                    input.cards.map((card, idx) => ({
                       user_id: user.id,
                       course_id: courseId,
                       topic_id: resolvedTopicId,
@@ -632,6 +654,7 @@ export async function POST(request: Request) {
                       back: card.back,
                       hint: null,
                       ...defaults,
+                      fsrs_next_review_date: dueDates[idx] ?? defaults.fsrs_next_review_date,
                     }))
                   ).select('card_id, front, back')
                   if (insertError) throw insertError

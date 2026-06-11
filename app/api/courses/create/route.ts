@@ -1,3 +1,4 @@
+import { recordUsage } from '@/lib/usage'
 import { createClient, createServiceClient } from '@/lib/supabase/server'
 import { getUserApiKey } from '@/lib/vault'
 import { requireOwnedProfessor } from '@/lib/authz'
@@ -29,6 +30,7 @@ async function assignCourseIcon(userId: string, courseId: string, courseName: st
         content: `Course: "${courseName}". Icons: ${iconList}. Colors: ${colorList}. Pick the best icon and color. JSON only: {"icon":"Name","color":"id"}`,
       }],
     })
+    recordUsage(userId, 'course_icon', 'claude-haiku-4-5-20251001', msg.usage) // #30
     const text = (msg.content[0] as { type: 'text'; text: string }).text
     const match = text.match(/\{[^}]+\}/)
     if (!match) return

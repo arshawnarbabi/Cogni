@@ -406,7 +406,7 @@ export async function runProfiler(
   if (extracted.isImagePdf || extracted.isImageFile) {
     const visualBlock = await buildVisualBlock(buffer, extracted)
     if (visualBlock) {
-      const visionText = await extractContentFromVision(client, visualBlock)
+      const visionText = await extractContentFromVision(client, visualBlock, userId)
       if (visionText.trim().length >= 50) {
         syllabusText = visionText
       }

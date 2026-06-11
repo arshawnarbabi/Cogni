@@ -32,8 +32,14 @@ export function normalizeBaseUrl(input: string): string | null {
   const withScheme = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`
   try {
     const u = new URL(withScheme)
-    if (!/^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}$/i.test(u.hostname)) return null
-    return `https://${u.hostname.toLowerCase()}`
+    const host = u.hostname.toLowerCase()
+    // The regex already rejects IP literals + dotless names (localhost); also
+    // reject internal-network suffixes so a self-hosted Cogni inside a private
+    // network can't be steered into fetching intranet services (H8) — Canvas
+    // instances live on public DNS.
+    if (!/^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}$/i.test(host)) return null
+    if (/\.(local|localhost|internal|intranet|lan|home|corp)$/.test(host)) return null
+    return `https://${host}`
   } catch {
     return null
   }

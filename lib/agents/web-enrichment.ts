@@ -1,3 +1,4 @@
+import { recordUsage } from '@/lib/usage'
 import Anthropic from '@anthropic-ai/sdk'
 import { createServiceClient } from '@/lib/supabase/server'
 import { log } from '@/lib/log'
@@ -57,6 +58,7 @@ export async function runWebEnrichment(
       }
 
       const final = await stream.finalMessage()
+      recordUsage(userId, 'web_enrichment', 'claude-sonnet-4-6', final.usage) // #30
       finalMsg = final
 
       if (final.stop_reason === 'tool_use') {
