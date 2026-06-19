@@ -4,6 +4,63 @@ All notable changes to Cogni are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [2.1.0] — 2026-06-19 · "Hardening"
+
+A deep security + correctness pass over the whole codebase (multi-agent audit
+with adversarial verification, 63 confirmed findings — all fixed), plus new
+test coverage and conflict-aware calendar scheduling. Backward-compatible and
+BYOK.
+
+> **Upgrading:** run [`supabase/big-update.sql`](supabase/big-update.sql) **once**
+> before deploying — it now also includes the RLS lockdown (Section 21) and the
+> race-safety constraints (Section 22). Idempotent; fresh installs use
+> `setup.sql`, which produces a byte-identical schema.
+
+### Security
+- **RLS lockdown.** Per-user table policies are now `SELECT`-only; browser
+  clients can no longer write rows directly via PostgREST (previously a signed-in
+  user could self-unsuspend, raise their own rate limit, or reset usage counters).
+  All writes flow exclusively through authorized server routes.
+- OAuth `state` is now an unguessable per-flow nonce in an HttpOnly cookie
+  (was the predictable user id — a forgeable account-linking callback).
+- GDPR export redacts the live calendar feed token; Sentry scrubs feed tokens
+  from event URLs; the ICS feed escapes bare carriage returns (calendar
+  injection); the CSP-report endpoint caps body size and strips control
+  characters; the Canvas base URL rejects internal-network hosts (SSRF guard for
+  self-hosters); MCP `create_flashcards` caps card text.
+
+### Fixed
+- **Canvas grade sync was silently broken** — a partial unique index made every
+  grade upsert fail (error swallowed), and `canvas_token` was missing from the
+  key allowlist (which 500'd the entire Canvas connection). Both fixed; sync
+  now writes grades and reports per-section errors.
+- **Spaced repetition never graduated cards** — `learning_steps` was never
+  persisted, so a card rated "Good" restarted learning every day forever. Now
+  uses the long-term scheduler so intervals actually grow.
+- **7 race conditions** made safe with DB constraints (duplicate study-plan
+  jobs, duplicate exams, duplicate uploads, grade-scheme wipes) plus a per-user
+  scheduler mutex (concurrent runs no longer stack duplicate calendar blocks).
+- Mastery is no longer silently overwritten on a transient DB read error; exam
+  readiness falls back to course topics when pinned topic ids are stale; the
+  grade what-if normalizes schemes whose weights don't sum to 100; the storage
+  quota no longer fails open.
+- ~29 routes no longer 500 on malformed JSON; numeric inputs reject
+  NaN/Infinity/overflow with a 400; the self-set tutor daily limit is capped.
+- 17 UI failure-mode fixes: stuck spinners, optimistic deletes with no revert,
+  flashcard double-tap double-submit, tutor stream-failure handling, a quiz
+  grading error shown as a real 0%, and more.
+
+### Added / Changed
+- **Conflict-aware calendar scheduling** — study blocks are planned into the
+  free gaps around your existing Google Calendar events (read via freeBusy),
+  sized from your session-length preference × per-course workload, ordered by
+  priority, with breaks; "update" clears and re-creates idempotently.
+- AI usage is now tracked across all surfaces (the Settings cost panel was
+  under-reporting); tutor chat images pass the same moderation gate as uploads.
+- Test coverage expanded to **132 unit + 36 integration** plus end-to-end
+  suites (production-build student journey, UI-robustness failure modes,
+  live-AI pipeline, MCP client, calendar planner). CI lockfile drift fixed.
+
 ## [2.0.0] — 2026-06-09 · "Memory · MCP · Grades"
 
 A major release built on top of the v1.3 production-hardening. Everything is

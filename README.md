@@ -7,7 +7,7 @@
   <img src="https://img.shields.io/badge/Supabase-PostgreSQL-3ECF8E" alt="Supabase" />
   <img src="https://img.shields.io/badge/Claude-Opus%204.8%20%7C%20Sonnet%204.6%20%7C%20Haiku%204.5-CC785C" alt="Claude" />
   <img src="https://img.shields.io/badge/MCP-bring%20your%20own%20Claude-CC785C" alt="MCP" />
-  <img src="https://img.shields.io/badge/release-v2.0.0-1D4ED8" alt="v2.0.0" />
+  <img src="https://img.shields.io/badge/release-v2.1.0-1D4ED8" alt="v2.1.0" />
   <img src="https://img.shields.io/badge/hosting-self--host%20%7C%20multi--tenant-7C3AED" alt="Self-host or multi-tenant" />
   <img src="https://img.shields.io/badge/status-beta-F59E0B" alt="Beta" />
   <a href="https://trycogni.arshawnarbabi.com/"><img src="https://img.shields.io/badge/website-trycogni.arshawnarbabi.com-1D4ED8" alt="Website" /></a>
@@ -20,7 +20,7 @@ Cogni decides what to study, when to study, and how — so you just show up. Fee
 
 Run it two ways: **self-hosted** for a single user, or **hosted multi-tenant** — one operator running a public instance for many users (open / invite-code / `.edu` signup gating, per-user AI quotas, kill-switches, legal pages, and more). Either way it stays BYOK and self-hostable.
 
-> **v2.0.0 — "Memory · MCP · Grades":** persistent tutor memory between sessions, a built-in MCP server (study through your own Claude), grade tracking with a "what do I need on the final" calculator, Canvas import, semester standing, and mastery decay — on top of the v1.3 production-hardening. Everything is additive and BYOK. **Requires running [`supabase/big-update.sql`](supabase/big-update.sql) once before deploying** (idempotent). See the [CHANGELOG](CHANGELOG.md) for the full list.
+> **v2.1.0 — "Hardening":** a deep security + correctness pass — RLS lockdown (browser clients are read-only; all writes go through authorized server routes), race-safety DB constraints, conflict-aware calendar scheduling (study blocks fit the gaps around your real events), restored Canvas sync, fixed spaced-repetition graduation, plus broad input-validation and UI-robustness fixes — backed by 168 unit + integration tests and live end-to-end coverage. Builds on **v2.0.0 — "Memory · MCP · Grades"** (persistent tutor memory, a built-in MCP server, grade tracking with a "what do I need on the final" calculator, Canvas import, semester standing, mastery decay). Everything is additive and BYOK. **Requires running [`supabase/big-update.sql`](supabase/big-update.sql) once before deploying** (idempotent). See the [CHANGELOG](CHANGELOG.md) for the full list.
 
 > **Beta:** Cogni is under active development. Expect rough edges, verify important study data, and test thoroughly before relying on it for critical coursework.
 
@@ -208,8 +208,8 @@ Fork the repo and deploy to Vercel, or run locally with `npm run dev`. **Vercel 
 
 Create a new Supabase project, then **enable the Vault extension** (Dashboard → Database → Extensions → `supabase_vault`) — it stores your API keys and calendar tokens. Then set up the database:
 
-- **Fresh install:** paste [`supabase/setup.sql`](supabase/setup.sql) into the SQL editor and run it once. It bundles every migration (through v2.0.0) in the correct order and is idempotent, so it's safe to re-run.
-- **Upgrading from v1.3.x:** run [`supabase/big-update.sql`](supabase/big-update.sql) once — it adds everything in v2.0.0 (memory, MCP tokens, grades, Canvas, jobs, semester data) and is self-contained + idempotent. `setup.sql` and `old-prod + big-update.sql` produce a byte-identical schema.
+- **Fresh install:** paste [`supabase/setup.sql`](supabase/setup.sql) into the SQL editor and run it once. It bundles every migration (through v2.1.0) in the correct order and is idempotent, so it's safe to re-run.
+- **Upgrading (from v1.3.x or v2.0.0):** run [`supabase/big-update.sql`](supabase/big-update.sql) once — it adds everything through v2.1.0 (memory, MCP tokens, grades, Canvas, jobs, semester data, plus the v2.1.0 RLS lockdown and race-safety constraints) and is self-contained + idempotent. `setup.sql` and `old-prod + big-update.sql` produce a byte-identical schema.
 - **Manual:** run the individual files in the order in [`supabase/README.md`](supabase/README.md).
 
 **Step 3 — Environment variables**
