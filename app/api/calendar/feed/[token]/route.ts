@@ -12,7 +12,7 @@ export const dynamic = 'force-dynamic'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
-function icsEscape(s: string): string {
+export function icsEscape(s: string): string {
   // \r\n|[\r\n] (not \r?\n) — a BARE carriage return slipped through and
   // lenient ICS parsers split on it, letting a hostile assignment/course name
   // inject whole properties or events into the subscribed calendar (H14).

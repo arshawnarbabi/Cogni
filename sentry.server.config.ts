@@ -1,21 +1,10 @@
 import * as Sentry from '@sentry/nextjs'
+import { scrubEvent } from '@/lib/sentry-scrub'
 
 // Server-side error monitoring. No-op unless SENTRY_DSN is set, so local/dev and
 // any deploy without the env var are unaffected.
 const dsn = process.env.SENTRY_DSN
 
-// H13: the calendar feed token travels in the URL path (inherent to ICS
-// subscriptions) — scrub it from any event/transaction so an uncaught error in
-// that route can't persist the live token in Sentry.
-const scrubUrl = (u: unknown): string | undefined =>
-  typeof u === 'string' ? u.replace(/(\/api\/calendar\/feed\/)[^/?#]+/g, '$1[token]') : undefined
-
-type UrlEvent = { request?: { url?: string }; transaction?: string }
-function scrubEvent<E extends UrlEvent>(event: E): E {
-  if (event.request?.url) event.request.url = scrubUrl(event.request.url) ?? event.request.url
-  if (event.transaction) event.transaction = scrubUrl(event.transaction) ?? event.transaction
-  return event
-}
 
 
 Sentry.init({
