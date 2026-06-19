@@ -1,7 +1,7 @@
 import { createClient, createServiceClient } from '@/lib/supabase/server'
 import { listUserSessions } from '@/lib/agents/tutor'
 import { requireOwnedSession } from '@/lib/authz'
-import { serverError } from '@/lib/api-error'
+import { serverError, readJson, badRequest } from '@/lib/api-error'
 import { NextResponse } from 'next/server'
 
 export async function GET() {
@@ -22,7 +22,21 @@ export async function PATCH(request: Request) {
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
-  const { essay_content } = await request.json() as { essay_content: string }
+  // readJson: malformed JSON is a 400, not an unhandled exception → 500.
+  const body = await readJson<{ essay_content: unknown }>(request)
+  if (!body) return badRequest('invalid_json')
+  const { essay_content } = body
+
+  // essay_content is persisted free text that's re-downloaded with every session
+  // list — bound it like the wiki route (400 non-string, 413 over 200k chars)
+  // instead of letting the text column reject non-strings with a 500.
+  if (typeof essay_content !== 'string') {
+    return badRequest('invalid_essay_content')
+  }
+  if (essay_content.length > 200_000) {
+    return NextResponse.json({ error: 'essay too large' }, { status: 413 })
+  }
+
   const session = await requireOwnedSession(user.id, sessionId)
   if (!session) return NextResponse.json({ error: 'Not found' }, { status: 404 })
 

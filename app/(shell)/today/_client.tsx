@@ -324,7 +324,7 @@ export function TodayClient({
   courseIconMap: CourseIconMap
 }) {
   const router = useRouter()
-  const [completed, setCompleted] = useState<Set<number>>(new Set())
+  const [completed, setCompleted] = useState<Set<string>>(new Set())
   const [activeNudge, setActiveNudge] = useState<ActiveNudge | null>(initialNudge)
 
   const insightTask = tasks.find(t => t.type === 'insight') as Extract<TaskItem, { type: 'insight' }> | undefined
@@ -334,17 +334,26 @@ export function TodayClient({
 
   const actionableTasks = tasks.filter(t => t.type !== 'insight')
 
-  // A homework task counts as completed if it was already marked complete server-side OR optimistically by this session
-  function isTaskCompleted(task: TaskItem, idx: number): boolean {
-    if (task.type === 'homework' && (task as Extract<TaskItem, { type: 'homework' }>).completion_status === 'complete') return true
-    return completed.has(idx)
+  // Stable identity for a task — array indices desync when router.refresh()
+  // recomputes the task list (day rollover, plan re-runs), which made
+  // checkmarks jump onto the wrong cards.
+  function taskKey(task: TaskItem): string {
+    if (task.type === 'homework') return `homework:${task.assignment_id}`
+    if (task.type === 'insight') return `insight:${task.order}`
+    return `${task.type}:${task.course_id}`
   }
 
-  const completedCount = actionableTasks.reduce((n, t, i) => n + (isTaskCompleted(t, i) ? 1 : 0), 0)
+  // A homework task counts as completed if it was already marked complete server-side OR optimistically by this session
+  function isTaskCompleted(task: TaskItem): boolean {
+    if (task.type === 'homework' && (task as Extract<TaskItem, { type: 'homework' }>).completion_status === 'complete') return true
+    return completed.has(taskKey(task))
+  }
+
+  const completedCount = actionableTasks.reduce((n, t) => n + (isTaskCompleted(t) ? 1 : 0), 0)
   const total = actionableTasks.length
 
-  async function markDone(globalIdx: number, assignmentId?: string) {
-    setCompleted(prev => new Set([...prev, globalIdx]))
+  async function markDone(task: TaskItem, assignmentId?: string) {
+    setCompleted(prev => new Set([...prev, taskKey(task)]))
     // No assignmentId = flashcard/quiz task that navigates elsewhere.
     // Don't refresh — it interferes with the pending <Link> navigation.
     if (!assignmentId) {
@@ -516,8 +525,8 @@ export function TodayClient({
                   <FlashcardTaskCard
                     task={task}
                     courseIconMap={courseIconMap}
-                    completed={completed.has(actionableTasks.indexOf(task))}
-                    onComplete={() => markDone(actionableTasks.indexOf(task))}
+                    completed={completed.has(taskKey(task))}
+                    onComplete={() => markDone(task)}
                   />
                 </StaggerItem>
               ))}
@@ -537,8 +546,8 @@ export function TodayClient({
                   <QuizTaskCard
                     task={task}
                     courseIconMap={courseIconMap}
-                    completed={completed.has(actionableTasks.indexOf(task))}
-                    onComplete={() => markDone(actionableTasks.indexOf(task))}
+                    completed={completed.has(taskKey(task))}
+                    onComplete={() => markDone(task)}
                   />
                 </StaggerItem>
               ))}
@@ -553,19 +562,16 @@ export function TodayClient({
               <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Homework</h2>
             </div>
             <StaggerList className="flex flex-col gap-3">
-              {hwTasks.sort((a, b) => a.order - b.order).map(task => {
-                const idx = actionableTasks.indexOf(task)
-                return (
-                  <StaggerItem key={task.assignment_id}>
-                    <HomeworkTaskCard
-                      task={task}
-                      courseIconMap={courseIconMap}
-                      completed={isTaskCompleted(task, idx)}
-                      onComplete={() => markDone(idx, task.assignment_id)}
-                    />
-                  </StaggerItem>
-                )
-              })}
+              {hwTasks.sort((a, b) => a.order - b.order).map(task => (
+                <StaggerItem key={task.assignment_id}>
+                  <HomeworkTaskCard
+                    task={task}
+                    courseIconMap={courseIconMap}
+                    completed={isTaskCompleted(task)}
+                    onComplete={() => markDone(task, task.assignment_id)}
+                  />
+                </StaggerItem>
+              ))}
             </StaggerList>
           </div>
         ) })

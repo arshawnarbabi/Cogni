@@ -22,6 +22,9 @@ export async function GET() {
   const SECRET_COLUMNS: Record<string, string[]> = {
     user_keys: ['key_value'],
     calendar_connections: ['access_token', 'refresh_token'],
+    // H11: the feed token is a live, non-expiring capability URL to the user's
+    // full calendar — export files get archived/shared, so redact it too.
+    users: ['calendar_feed_token'],
   }
 
   try {
@@ -52,12 +55,29 @@ export async function GET() {
         : (rows ?? [])
     }
 
-    // Storage file listing (paths only) across the user's buckets.
+    // Storage file listing (paths only) across the user's buckets. Recursive
+    // (G6): list() returns one level only, and course files + syllabi live
+    // under nested prefixes — a flat list silently omitted all of them.
     const buckets = ['materials', 'wiki', 'audio', 'course-files']
     const storage: Record<string, string[]> = {}
     for (const bucket of buckets) {
-      const { data: files } = await service.storage.from(bucket).list(user.id, { limit: 1000 })
-      storage[bucket] = (files ?? []).map((f: { name: string }) => `${user.id}/${f.name}`)
+      const collect = async (prefix: string): Promise<string[]> => {
+        const all: { id?: string | null; name: string }[] = []
+        let offset = 0
+        for (;;) {
+          const { data: page } = await service.storage.from(bucket).list(prefix, { limit: 1000, offset })
+          if (!page?.length) break
+          all.push(...page)
+          if (page.length < 1000) break
+          offset += 1000
+        }
+        const nested = await Promise.all(all.map(async f => {
+          const path = `${prefix}/${f.name}`
+          return f.id ? [path] : collect(path) // folders have no id
+        }))
+        return nested.flat()
+      }
+      storage[bucket] = await collect(user.id)
     }
 
     await auditLog('data_export', { actor: user.id, subjectUserId: user.id })

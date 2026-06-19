@@ -23,7 +23,10 @@ export default async function TutorPage() {
       .order('created_at', { ascending: true }),
     service
       .from('session_log')
-      .select('session_id, course_id, name, mode, created_at')
+      // essay_content MUST be included: loadSession branches on it to restore
+      // the essay editor — omitting it made every reopened essay session start
+      // empty, and the autosave then overwrote the stored essay (data loss).
+      .select('session_id, course_id, name, mode, created_at, essay_content')
       .eq('user_id', user.id)
       .order('created_at', { ascending: false })
       .limit(20),

@@ -1,3 +1,4 @@
+import { recordUsage } from '@/lib/usage'
 import type Anthropic from '@anthropic-ai/sdk'
 import type { DocumentBlockParam, ImageBlockParam, TextBlockParam } from '@anthropic-ai/sdk/resources/messages/messages'
 
@@ -96,6 +97,7 @@ Format as plain text. Return ONLY the transcribed content, nothing else.`
 export async function extractContentFromVision(
   client: Anthropic,
   visualBlock: DocumentBlockParam | ImageBlockParam,
+  userId?: string,
 ): Promise<string> {
   try {
     const textBlock: TextBlockParam = { type: 'text', text: EXTRACT_PROMPT }
@@ -104,6 +106,9 @@ export async function extractContentFromVision(
       max_tokens: 4096,
       messages: [{ role: 'user', content: [visualBlock, textBlock] }],
     })
+    // C7 usage transparency (#30): the vision path sends the FULL document as
+    // input tokens — the costliest part of an upload; it must show in Settings.
+    if (userId) recordUsage(userId, 'inbox', 'claude-haiku-4-5-20251001', msg.usage)
     return msg.content[0].type === 'text' ? msg.content[0].text : ''
   } catch {
     return ''

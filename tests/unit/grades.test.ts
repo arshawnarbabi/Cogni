@@ -229,3 +229,30 @@ describe('GradeOverride — direct class-grade input (F2)', () => {
     expect(s.current_pct).toBe(50) // not 100 from the item
   })
 })
+
+describe('schemes whose weights do not sum to 100 (#10 audit fix)', () => {
+  // Canvas group weights routinely sum to <100; weights are proportions.
+  const S90 = [
+    { category: 'Exams', weight_pct: 60 },
+    { category: 'Homework', weight_pct: 30 },
+  ]
+  it('fully-graded 85% average needs nothing impossible for an 80 target', () => {
+    const items = [
+      { category: 'Exams', points_earned: 85, points_possible: 100 },
+      { category: 'Homework', points_earned: 85, points_possible: 100 },
+    ]
+    const [t80] = whatIfTargets(S90, items, [80])
+    // Everything graded → nothing remaining; 85 ≥ 80 → secured, not "out of reach".
+    expect(t80.needed_pct).toBeNull()
+    expect(t80.achievable).toBe(true)
+  })
+  it('projection treats weights as proportions of the whole', () => {
+    // Exams fully graded at 90%; homework untouched → remaining is 30/90 of the course.
+    const items = [{ category: 'Exams', points_earned: 90, points_possible: 100 }]
+    const [t80] = whatIfTargets(S90, items, [80])
+    // locked = 90 × (60/90) = 60 pts; need (80−60)/(33.33…)×100 = 60% on the rest.
+    expect(t80.needed_pct).toBeGreaterThan(55)
+    expect(t80.needed_pct).toBeLessThan(65)
+    expect(t80.achievable).toBe(true)
+  })
+})

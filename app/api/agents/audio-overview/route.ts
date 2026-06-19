@@ -1,3 +1,4 @@
+import { recordUsage } from '@/lib/usage'
 import { createClient, createServiceClient } from '@/lib/supabase/server'
 import { getUserApiKey } from '@/lib/vault'
 import { getUserKey } from '@/lib/user-keys'
@@ -157,6 +158,7 @@ Course material:
 ${combinedText.slice(0, 20000)}`,
     }],
   })
+  recordUsage(user.id, 'audio_overview', 'claude-sonnet-4-6', scriptMessage.usage) // #30
 
   const scriptRaw = scriptMessage.content[0].type === 'text' ? scriptMessage.content[0].text : ''
   const segments = parseScript(scriptRaw)

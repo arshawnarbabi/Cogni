@@ -273,87 +273,87 @@ alter table public.material_embeddings enable row level security;
 -- Users
 drop policy if exists "users: own row only" on public.users;
 create policy "users: own row only" on public.users
-  for all using (auth.uid() = user_id);
+  for select using (auth.uid() = user_id);
 
 -- Professors
 drop policy if exists "professors: own rows only" on public.professors;
 create policy "professors: own rows only" on public.professors
-  for all using (auth.uid() = user_id);
+  for select using (auth.uid() = user_id);
 
 -- Courses
 drop policy if exists "courses: own rows only" on public.courses;
 create policy "courses: own rows only" on public.courses
-  for all using (auth.uid() = user_id);
+  for select using (auth.uid() = user_id);
 
 -- Topics
 drop policy if exists "topics: own rows only" on public.topics;
 create policy "topics: own rows only" on public.topics
-  for all using (auth.uid() = user_id);
+  for select using (auth.uid() = user_id);
 
 -- Topic Mastery
 drop policy if exists "topic_mastery: own rows only" on public.topic_mastery;
 create policy "topic_mastery: own rows only" on public.topic_mastery
-  for all using (auth.uid() = user_id);
+  for select using (auth.uid() = user_id);
 
 -- Flashcards
 drop policy if exists "flashcards: own rows only" on public.flashcards;
 create policy "flashcards: own rows only" on public.flashcards
-  for all using (auth.uid() = user_id);
+  for select using (auth.uid() = user_id);
 
 -- Exams
 drop policy if exists "exams: own rows only" on public.exams;
 create policy "exams: own rows only" on public.exams
-  for all using (auth.uid() = user_id);
+  for select using (auth.uid() = user_id);
 
 -- Assignments
 drop policy if exists "assignments: own rows only" on public.assignments;
 create policy "assignments: own rows only" on public.assignments
-  for all using (auth.uid() = user_id);
+  for select using (auth.uid() = user_id);
 
 -- Materials
 drop policy if exists "materials: own rows only" on public.materials;
 create policy "materials: own rows only" on public.materials
-  for all using (auth.uid() = user_id);
+  for select using (auth.uid() = user_id);
 
 -- Inbox Items
 drop policy if exists "inbox_items: own rows only" on public.inbox_items;
 create policy "inbox_items: own rows only" on public.inbox_items
-  for all using (auth.uid() = user_id);
+  for select using (auth.uid() = user_id);
 
 -- Session Log
 drop policy if exists "session_log: own rows only" on public.session_log;
 create policy "session_log: own rows only" on public.session_log
-  for all using (auth.uid() = user_id);
+  for select using (auth.uid() = user_id);
 
 -- Session Messages
 drop policy if exists "session_messages: own rows only" on public.session_messages;
 create policy "session_messages: own rows only" on public.session_messages
-  for all using (auth.uid() = user_id);
+  for select using (auth.uid() = user_id);
 
 -- Nudges
 drop policy if exists "nudges: own rows only" on public.nudges;
 create policy "nudges: own rows only" on public.nudges
-  for all using (auth.uid() = user_id);
+  for select using (auth.uid() = user_id);
 
 -- Wiki Versions
 drop policy if exists "wiki_versions: own rows only" on public.wiki_versions;
 create policy "wiki_versions: own rows only" on public.wiki_versions
-  for all using (auth.uid() = user_id);
+  for select using (auth.uid() = user_id);
 
 -- Study Plan
 drop policy if exists "study_plan: own rows only" on public.study_plan;
 create policy "study_plan: own rows only" on public.study_plan
-  for all using (auth.uid() = user_id);
+  for select using (auth.uid() = user_id);
 
 -- Mastery History
 drop policy if exists "mastery_history: own rows only" on public.mastery_history;
 create policy "mastery_history: own rows only" on public.mastery_history
-  for all using (auth.uid() = user_id);
+  for select using (auth.uid() = user_id);
 
 -- Material Embeddings
 drop policy if exists "material_embeddings: own rows only" on public.material_embeddings;
 create policy "material_embeddings: own rows only" on public.material_embeddings
-  for all using (auth.uid() = user_id);
+  for select using (auth.uid() = user_id);
 
 -- ============================================================
 -- INDEXES (performance) — named + if-not-exists so re-runs are safe
@@ -579,7 +579,7 @@ alter table public.course_files enable row level security;
 
 drop policy if exists "owner_all" on public.course_files;
 create policy "owner_all" on public.course_files
-  for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+  for select using (auth.uid() = user_id);
 
 -- Index for fast per-course lookups
 create index if not exists course_files_course_id_idx on public.course_files (course_id);
@@ -637,7 +637,7 @@ alter table public.calendar_connections enable row level security;
 
 drop policy if exists "calendar_connections: own rows only" on public.calendar_connections;
 create policy "calendar_connections: own rows only" on public.calendar_connections
-  for all using (auth.uid() = user_id);
+  for select using (auth.uid() = user_id);
 
 
 -- ----- practice-test-results.sql -----
@@ -660,11 +660,8 @@ create table if not exists public.practice_test_results (
 alter table public.practice_test_results enable row level security;
 
 drop policy if exists "Users manage own practice results" on public.practice_test_results;
-create policy "Users manage own practice results"
-  on public.practice_test_results
-  for all
-  using (auth.uid() = user_id)
-  with check (auth.uid() = user_id);
+create policy "Users manage own practice results" on public.practice_test_results
+  for select using (auth.uid() = user_id);
 
 
 -- ----- course-web-suggestions.sql -----
@@ -686,11 +683,8 @@ create table if not exists public.course_web_suggestions (
 alter table public.course_web_suggestions enable row level security;
 
 drop policy if exists "Users manage their own web suggestions" on public.course_web_suggestions;
-create policy "Users manage their own web suggestions"
-  on public.course_web_suggestions
-  for all
-  using  (auth.uid() = user_id)
-  with check (auth.uid() = user_id);
+create policy "Users manage their own web suggestions" on public.course_web_suggestions
+  for select using (auth.uid() = user_id);
 
 
 -- ----- user-keys.sql -----
@@ -713,9 +707,8 @@ ALTER TABLE user_keys ENABLE ROW LEVEL SECURITY;
 
 DROP POLICY IF EXISTS "Users manage their own keys" ON user_keys;
 CREATE POLICY "Users manage their own keys"
-  ON user_keys FOR ALL
-  USING (auth.uid() = user_id)
-  WITH CHECK (auth.uid() = user_id);
+  ON user_keys FOR SELECT
+  USING (auth.uid() = user_id);
 
 
 -- ======================================================================
@@ -1140,30 +1133,10 @@ grant execute on function public.delete_user_secret(uuid, text)                 
 grant execute on function public.review_card_atomic(uuid, uuid, numeric, numeric, integer, integer, text, timestamptz, date, numeric, numeric, smallint, uuid)
                                                                                  to service_role;
 
--- ── 2. Explicit WITH CHECK on all 18 user-scoped policies ────
--- PostgreSQL already falls back to the USING expression as the implicit
--- WITH CHECK, so this is defense-in-depth: it makes the INSERT/UPDATE row
--- constraint explicit instead of relying on the engine default. ALTER POLICY
--- preserves the existing USING clause and is idempotent.
-
-alter policy "users: own row only" on public.users with check (auth.uid() = user_id);
-alter policy "professors: own rows only" on public.professors with check (auth.uid() = user_id);
-alter policy "courses: own rows only" on public.courses with check (auth.uid() = user_id);
-alter policy "topics: own rows only" on public.topics with check (auth.uid() = user_id);
-alter policy "topic_mastery: own rows only" on public.topic_mastery with check (auth.uid() = user_id);
-alter policy "flashcards: own rows only" on public.flashcards with check (auth.uid() = user_id);
-alter policy "exams: own rows only" on public.exams with check (auth.uid() = user_id);
-alter policy "assignments: own rows only" on public.assignments with check (auth.uid() = user_id);
-alter policy "materials: own rows only" on public.materials with check (auth.uid() = user_id);
-alter policy "inbox_items: own rows only" on public.inbox_items with check (auth.uid() = user_id);
-alter policy "session_log: own rows only" on public.session_log with check (auth.uid() = user_id);
-alter policy "session_messages: own rows only" on public.session_messages with check (auth.uid() = user_id);
-alter policy "nudges: own rows only" on public.nudges with check (auth.uid() = user_id);
-alter policy "wiki_versions: own rows only" on public.wiki_versions with check (auth.uid() = user_id);
-alter policy "study_plan: own rows only" on public.study_plan with check (auth.uid() = user_id);
-alter policy "mastery_history: own rows only" on public.mastery_history with check (auth.uid() = user_id);
-alter policy "material_embeddings: own rows only" on public.material_embeddings with check (auth.uid() = user_id);
-alter policy "calendar_connections: own rows only" on public.calendar_connections with check (auth.uid() = user_id);
+-- ── 2. (removed) Explicit WITH CHECK on user-scoped policies ────
+-- Obsolete: the v2.1.1 RLS lockdown made every user policy SELECT-only
+-- (writes go exclusively through the service role), and WITH CHECK is
+-- invalid on FOR SELECT policies.
 
 -- ── 3. Unique constraints behind the de-dup logic ───────────
 -- onboarding/complete dedupes professors/courses by name (select-then-insert =
@@ -1256,7 +1229,7 @@ create table if not exists public.daily_usage (
 alter table public.daily_usage enable row level security;
 drop policy if exists "daily_usage: own rows only" on public.daily_usage;
 create policy "daily_usage: own rows only" on public.daily_usage
-  for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+  for select using (auth.uid() = user_id);
 
 -- Atomic "increment and check" — returns true if still within the limit.
 -- SECURITY DEFINER + service-role only (called from server routes), consistent
@@ -1822,8 +1795,13 @@ create policy "grade_items: own rows only" on public.grade_items
   for select using (auth.uid() = user_id);
 create index if not exists idx_grade_items_user_course on public.grade_items(user_id, course_id);
 -- One row per Canvas assignment per course (re-sync upserts on this).
+-- MUST be a full (non-partial) index: PostgREST's on_conflict can't carry an
+-- index predicate, and Postgres can't infer a partial unique index without one
+-- (42P10) — a partial index here silently broke every Canvas grade sync.
+-- Default NULLS DISTINCT still allows unlimited manual rows (NULL external_id).
+drop index if exists grade_items_external_uniq;
 create unique index if not exists grade_items_external_uniq
-  on public.grade_items(user_id, course_id, external_id) where external_id is not null;
+  on public.grade_items(user_id, course_id, external_id);
 
 -- Canvas connection (S5): one per user. The access token itself lives in the
 -- Vault (user_keys secret 'canvas_token'), never in a table column.
@@ -1890,3 +1868,50 @@ create policy "course_grade_manual: own rows only" on public.course_grade_manual
   for select using (auth.uid() = user_id);
 
 notify pgrst, 'reload schema';
+
+-- ── Section 22: Race-safety constraints (v2.1.1 audit #4/#5/#26/#27/#28) ─────
+-- Check-then-act dedup in app code is racy under concurrent requests; these
+-- constraints make the DB the arbiter. Dedup passes run first: a unique index
+-- cannot be created while violating rows exist.
+
+-- #5/#27: one QUEUED job per (user, kind, subject/course) — concurrent uploads
+-- enqueued duplicate flashcards/distill jobs (double decks, double AI spend).
+with ranked as (
+  select job_id, row_number() over (
+    partition by user_id, kind, coalesce(subject_id::text, ''), coalesce(payload->>'courseId', '')
+    order by created_at
+  ) rn from public.jobs where status = 'queued'
+)
+delete from public.jobs where job_id in (select job_id from ranked where rn > 1);
+create unique index if not exists jobs_queued_dedup_uniq
+  on public.jobs (user_id, kind, coalesce(subject_id::text, ''), coalesce(payload->>'courseId', ''))
+  where status = 'queued';
+
+-- #26: one exam per (user, course, date) — the profiler's check-then-insert
+-- raced under concurrent profile jobs, duplicating exam rows (and with them
+-- readiness cards, scheduler urgency and calendar entries).
+with ranked as (
+  select exam_id, row_number() over (
+    partition by user_id, course_id, date order by created_at
+  ) rn from public.exams
+)
+delete from public.exams where exam_id in (select exam_id from ranked where rn > 1);
+create unique index if not exists exams_user_course_date_uniq
+  on public.exams(user_id, course_id, date);
+
+-- #4: the inbox filename dedup check raced double-submits — both requests saw
+-- no existing row and both inserted (two materials, two classifications billed).
+-- Partial: a 'failed' material must not block the user's retry re-upload.
+with ranked as (
+  select material_id, row_number() over (
+    partition by user_id, filename order by uploaded_at
+  ) rn from public.materials where processing_status <> 'failed'
+)
+delete from public.materials where material_id in (select material_id from ranked where rn > 1);
+create unique index if not exists materials_user_filename_active_uniq
+  on public.materials(user_id, filename) where processing_status <> 'failed';
+
+-- #28: serverless-safe per-user mutex for the scheduler (TTL'd claim column) —
+-- concurrent runs interleaved the calendar delete-then-create, stacking
+-- duplicate study blocks in Google Calendar.
+alter table public.users add column if not exists scheduler_lock_at timestamptz;

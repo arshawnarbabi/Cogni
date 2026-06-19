@@ -515,8 +515,13 @@ create policy "grade_items: own rows only" on public.grade_items
   for select using (auth.uid() = user_id);
 create index if not exists idx_grade_items_user_course on public.grade_items(user_id, course_id);
 -- One row per Canvas assignment per course (re-sync upserts on this).
+-- MUST be a full (non-partial) index: PostgREST's on_conflict can't carry an
+-- index predicate, and Postgres can't infer a partial unique index without one
+-- (42P10) — a partial index here silently broke every Canvas grade sync.
+-- Default NULLS DISTINCT still allows unlimited manual rows (NULL external_id).
+drop index if exists grade_items_external_uniq;
 create unique index if not exists grade_items_external_uniq
-  on public.grade_items(user_id, course_id, external_id) where external_id is not null;
+  on public.grade_items(user_id, course_id, external_id);
 
 -- Canvas connection (S5): one per user. The access token itself lives in the
 -- Vault (user_keys secret 'canvas_token'), never in a table column.
@@ -586,3 +591,125 @@ notify pgrst, 'reload schema';
 select
   (select count(*) from pg_indexes where indexname = 'topics_user_course_name_uniq') as topics_idx,
   (select count(*) from pg_indexes where indexname = 'assignments_user_course_name_due_uniq') as assignments_idx;
+
+-- ── Section 21: RLS lockdown (v2.1.1 audit H9) ──────────────────────────────
+-- FOR ALL policies let any signed-in user WRITE their own rows directly via
+-- PostgREST with the public anon key — bypassing every route-level control
+-- (suspension, rate limits, quotas, validation). All app writes go through
+-- the service role (bypasses RLS), so user policies need only SELECT.
+drop policy if exists "users: own row only" on public.users;
+create policy "users: own row only" on public.users
+  for select using (auth.uid() = user_id);
+drop policy if exists "professors: own rows only" on public.professors;
+create policy "professors: own rows only" on public.professors
+  for select using (auth.uid() = user_id);
+drop policy if exists "courses: own rows only" on public.courses;
+create policy "courses: own rows only" on public.courses
+  for select using (auth.uid() = user_id);
+drop policy if exists "topics: own rows only" on public.topics;
+create policy "topics: own rows only" on public.topics
+  for select using (auth.uid() = user_id);
+drop policy if exists "topic_mastery: own rows only" on public.topic_mastery;
+create policy "topic_mastery: own rows only" on public.topic_mastery
+  for select using (auth.uid() = user_id);
+drop policy if exists "flashcards: own rows only" on public.flashcards;
+create policy "flashcards: own rows only" on public.flashcards
+  for select using (auth.uid() = user_id);
+drop policy if exists "exams: own rows only" on public.exams;
+create policy "exams: own rows only" on public.exams
+  for select using (auth.uid() = user_id);
+drop policy if exists "assignments: own rows only" on public.assignments;
+create policy "assignments: own rows only" on public.assignments
+  for select using (auth.uid() = user_id);
+drop policy if exists "materials: own rows only" on public.materials;
+create policy "materials: own rows only" on public.materials
+  for select using (auth.uid() = user_id);
+drop policy if exists "inbox_items: own rows only" on public.inbox_items;
+create policy "inbox_items: own rows only" on public.inbox_items
+  for select using (auth.uid() = user_id);
+drop policy if exists "session_log: own rows only" on public.session_log;
+create policy "session_log: own rows only" on public.session_log
+  for select using (auth.uid() = user_id);
+drop policy if exists "session_messages: own rows only" on public.session_messages;
+create policy "session_messages: own rows only" on public.session_messages
+  for select using (auth.uid() = user_id);
+drop policy if exists "nudges: own rows only" on public.nudges;
+create policy "nudges: own rows only" on public.nudges
+  for select using (auth.uid() = user_id);
+drop policy if exists "wiki_versions: own rows only" on public.wiki_versions;
+create policy "wiki_versions: own rows only" on public.wiki_versions
+  for select using (auth.uid() = user_id);
+drop policy if exists "study_plan: own rows only" on public.study_plan;
+create policy "study_plan: own rows only" on public.study_plan
+  for select using (auth.uid() = user_id);
+drop policy if exists "mastery_history: own rows only" on public.mastery_history;
+create policy "mastery_history: own rows only" on public.mastery_history
+  for select using (auth.uid() = user_id);
+drop policy if exists "material_embeddings: own rows only" on public.material_embeddings;
+create policy "material_embeddings: own rows only" on public.material_embeddings
+  for select using (auth.uid() = user_id);
+drop policy if exists "owner_all" on public.course_files;
+create policy "owner_all" on public.course_files
+  for select using (auth.uid() = user_id);
+drop policy if exists "calendar_connections: own rows only" on public.calendar_connections;
+create policy "calendar_connections: own rows only" on public.calendar_connections
+  for select using (auth.uid() = user_id);
+drop policy if exists "Users manage own practice results" on public.practice_test_results;
+create policy "Users manage own practice results" on public.practice_test_results
+  for select using (auth.uid() = user_id);
+drop policy if exists "Users manage their own web suggestions" on public.course_web_suggestions;
+create policy "Users manage their own web suggestions" on public.course_web_suggestions
+  for select using (auth.uid() = user_id);
+drop policy if exists "daily_usage: own rows only" on public.daily_usage;
+create policy "daily_usage: own rows only" on public.daily_usage
+  for select using (auth.uid() = user_id);
+drop policy if exists "Users manage their own keys" on public.user_keys;
+create policy "Users manage their own keys" on public.user_keys
+  for select using (auth.uid() = user_id);
+
+-- ── Section 22: Race-safety constraints (v2.1.1 audit #4/#5/#26/#27/#28) ─────
+-- Check-then-act dedup in app code is racy under concurrent requests; these
+-- constraints make the DB the arbiter. Dedup passes run first: a unique index
+-- cannot be created while violating rows exist.
+
+-- #5/#27: one QUEUED job per (user, kind, subject/course) — concurrent uploads
+-- enqueued duplicate flashcards/distill jobs (double decks, double AI spend).
+with ranked as (
+  select job_id, row_number() over (
+    partition by user_id, kind, coalesce(subject_id::text, ''), coalesce(payload->>'courseId', '')
+    order by created_at
+  ) rn from public.jobs where status = 'queued'
+)
+delete from public.jobs where job_id in (select job_id from ranked where rn > 1);
+create unique index if not exists jobs_queued_dedup_uniq
+  on public.jobs (user_id, kind, coalesce(subject_id::text, ''), coalesce(payload->>'courseId', ''))
+  where status = 'queued';
+
+-- #26: one exam per (user, course, date) — the profiler's check-then-insert
+-- raced under concurrent profile jobs, duplicating exam rows (and with them
+-- readiness cards, scheduler urgency and calendar entries).
+with ranked as (
+  select exam_id, row_number() over (
+    partition by user_id, course_id, date order by created_at
+  ) rn from public.exams
+)
+delete from public.exams where exam_id in (select exam_id from ranked where rn > 1);
+create unique index if not exists exams_user_course_date_uniq
+  on public.exams(user_id, course_id, date);
+
+-- #4: the inbox filename dedup check raced double-submits — both requests saw
+-- no existing row and both inserted (two materials, two classifications billed).
+-- Partial: a 'failed' material must not block the user's retry re-upload.
+with ranked as (
+  select material_id, row_number() over (
+    partition by user_id, filename order by uploaded_at
+  ) rn from public.materials where processing_status <> 'failed'
+)
+delete from public.materials where material_id in (select material_id from ranked where rn > 1);
+create unique index if not exists materials_user_filename_active_uniq
+  on public.materials(user_id, filename) where processing_status <> 'failed';
+
+-- #28: serverless-safe per-user mutex for the scheduler (TTL'd claim column) —
+-- concurrent runs interleaved the calendar delete-then-create, stacking
+-- duplicate study blocks in Google Calendar.
+alter table public.users add column if not exists scheduler_lock_at timestamptz;

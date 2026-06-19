@@ -1,6 +1,6 @@
 import { createClient, createServiceClient } from '@/lib/supabase/server'
 import { requireOwnedCourse } from '@/lib/authz'
-import { serverError, badRequest, unauthorized, notFound } from '@/lib/api-error'
+import { serverError, badRequest, unauthorized, notFound, readJson, finiteNumber } from '@/lib/api-error'
 import { NextResponse } from 'next/server'
 
 export const dynamic = 'force-dynamic'
@@ -22,22 +22,22 @@ export async function PUT(request: Request) {
   const user = await authedUser()
   if (!user) return unauthorized()
 
-  const body = await request.json() as { courseId?: string; current_pct?: number; remaining_weight_pct?: number }
+  const body = await readJson<{ courseId?: string; current_pct?: number; remaining_weight_pct?: number }>(request)
+  if (!body) return badRequest('invalid_json')
   if (!body.courseId) return badRequest('missing_courseId')
-  if (typeof body.current_pct !== 'number' || body.current_pct < 0 || body.current_pct > 100) {
-    return badRequest('invalid_current_pct')
-  }
-  const remaining = body.remaining_weight_pct ?? 0
-  if (typeof remaining !== 'number' || remaining < 0 || remaining > 100) {
-    return badRequest('invalid_remaining_weight_pct')
-  }
+  // finiteNumber also rejects NaN, which `typeof === 'number'` + range checks
+  // let through (NaN < 0 and NaN > 100 are both false).
+  const current = finiteNumber(body.current_pct, { min: 0, max: 100 })
+  if (current === null) return badRequest('invalid_current_pct')
+  const remaining = body.remaining_weight_pct === undefined ? 0 : finiteNumber(body.remaining_weight_pct, { min: 0, max: 100 })
+  if (remaining === null) return badRequest('invalid_remaining_weight_pct')
   if (!(await requireOwnedCourse(user.id, body.courseId))) return notFound('course_not_found')
 
   const service = createServiceClient()
   const { error } = await service.from('course_grade_manual').upsert({
     user_id: user.id,
     course_id: body.courseId,
-    current_pct: Math.round(body.current_pct * 100) / 100,
+    current_pct: Math.round(current * 100) / 100,
     remaining_weight_pct: Math.round(remaining * 100) / 100,
     updated_at: new Date().toISOString(),
   }, { onConflict: 'user_id,course_id' })
@@ -49,7 +49,9 @@ export async function DELETE(request: Request) {
   const user = await authedUser()
   if (!user) return unauthorized()
 
-  const { courseId } = await request.json() as { courseId?: string }
+  const body = await readJson<{ courseId?: string }>(request)
+  if (!body) return badRequest('invalid_json')
+  const { courseId } = body
   if (!courseId) return badRequest('missing_courseId')
 
   const service = createServiceClient()

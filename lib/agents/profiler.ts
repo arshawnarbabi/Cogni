@@ -406,7 +406,7 @@ export async function runProfiler(
   if (extracted.isImagePdf || extracted.isImageFile) {
     const visualBlock = await buildVisualBlock(buffer, extracted)
     if (visualBlock) {
-      const visionText = await extractContentFromVision(client, visualBlock)
+      const visionText = await extractContentFromVision(client, visualBlock, userId)
       if (visionText.trim().length >= 50) {
         syllabusText = visionText
       }
@@ -686,7 +686,13 @@ export async function runProfiler(
         })
 
       if (examRowsToInsert.length > 0) {
-        const { error: examInsertError } = await service.from('exams').insert(examRowsToInsert)
+        // Upsert-ignore on (user_id, course_id, date): the date snapshot above
+        // is check-then-act — two concurrent profile jobs for the same course
+        // both saw "no exams" and both inserted, duplicating every exam row.
+        const { error: examInsertError } = await service.from('exams').upsert(examRowsToInsert, {
+          onConflict: 'user_id,course_id,date',
+          ignoreDuplicates: true,
+        })
         if (examInsertError) console.error(`${tag} exam batch insert failed`, examInsertError)
       }
     }

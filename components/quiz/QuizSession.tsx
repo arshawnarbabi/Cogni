@@ -34,7 +34,7 @@ type ConfigState = {
   checkTiming: CheckTiming
 }
 
-type QuizPhase = 'config' | 'loading' | 'quiz' | 'grading' | 'results'
+type QuizPhase = 'config' | 'loading' | 'quiz' | 'grading' | 'grading_error' | 'results'
 
 type Props = {
   courseId: string
@@ -728,6 +728,8 @@ export function QuizSession({ courseId, courseName, topicOptions, initialQuestio
   const [startTime, setStartTime] = useState<number>(0)
   const [loadingConfig, setLoadingConfig] = useState(false)
   const onExpireRef = useRef<() => void>(() => {})
+  // Last submission, kept so a failed grading call can be retried as-is
+  const lastSubmissionRef = useRef<{ answers: string[]; qs: QuizQuestion[] } | null>(null)
 
   // Sync when tutor regenerates the quiz (e.g. "add 2 more questions"): update
   // questions in place so the user doesn't have to close and reopen the split view.
@@ -744,6 +746,7 @@ export function QuizSession({ courseId, courseName, topicOptions, initialQuestio
   }, [initialQuestions])
 
   const submitAnswers = useCallback(async (answers: string[], qs: QuizQuestion[]) => {
+    lastSubmissionRef.current = { answers, qs }
     setPhase('grading')
     try {
       const durationSeconds = startTime ? Math.round((Date.now() - startTime) / 1000) : undefined
@@ -765,8 +768,8 @@ export function QuizSession({ courseId, courseName, topicOptions, initialQuestio
       })
       const data = await res.json() as GradeSummary & { error?: string }
       if (!res.ok || data.error || !Array.isArray(data.results) || !Array.isArray(data.missedTopics) || !Array.isArray(data.masteryUpdates)) {
-        setSummary({ correctCount: 0, scorePct: 0, missedTopics: [], masteryUpdates: [], results: [] })
-        setPhase('results')
+        // Don't fabricate a 0% score — surface the failure with a retry path
+        setPhase('grading_error')
         return
       }
       setSummary(data)
@@ -778,8 +781,7 @@ export function QuizSession({ courseId, courseName, topicOptions, initialQuestio
         fetch('/api/agents/scheduler/rerun', { method: 'POST' }).catch(() => {})
       }
     } catch {
-      setSummary({ correctCount: 0, scorePct: 0, missedTopics: [], masteryUpdates: [], results: [] })
-      setPhase('results')
+      setPhase('grading_error')
     }
   }, [courseId, examMode, configState.topicFilters, startTime, onComplete, normalizedInitial])
 
@@ -924,6 +926,25 @@ export function QuizSession({ courseId, courseName, topicOptions, initialQuestio
           <motion.div key="grading" className="flex flex-1 flex-col items-center justify-center gap-3" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
             <CircleNotch size={28} className="animate-spin text-primary" />
             <p className="text-sm text-muted-foreground">Grading your answers…</p>
+          </motion.div>
+        )}
+
+        {phase === 'grading_error' && (
+          <motion.div key="grading-error" className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+            <XCircle size={28} className="text-red-500" weight="fill" />
+            <div>
+              <p className="text-sm font-medium text-foreground">Grading failed</p>
+              <p className="mt-1 text-xs text-muted-foreground">Your answers are saved — try submitting again.</p>
+            </div>
+            <button
+              onClick={() => {
+                const last = lastSubmissionRef.current
+                if (last) submitAnswers(last.answers, last.qs)
+              }}
+              className="mt-1 rounded-xl bg-primary px-5 py-2.5 text-sm font-semibold text-primary-foreground hover:bg-primary/90 transition-colors"
+            >
+              Retry grading
+            </button>
           </motion.div>
         )}
 

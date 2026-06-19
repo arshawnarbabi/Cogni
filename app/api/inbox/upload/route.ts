@@ -161,6 +161,15 @@ export async function POST(request: Request) {
 
   if (materialError || !material) {
     await service.storage.from('materials').remove([storagePath])
+    // 23505 = materials_user_filename_active_uniq: a concurrent upload of the
+    // same file won the race (the SELECT check above is check-then-act). Same
+    // outcome as the check catching it — a duplicate, not a server error.
+    if (materialError?.code === '23505') {
+      return NextResponse.json(
+        { error: `"${filename}" has already been uploaded.` },
+        { status: 409 }
+      )
+    }
     return serverError('inbox/upload', materialError)
   }
 

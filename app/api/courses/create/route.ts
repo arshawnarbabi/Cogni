@@ -1,8 +1,10 @@
+import { recordUsage } from '@/lib/usage'
 import { createClient, createServiceClient } from '@/lib/supabase/server'
 import { getUserApiKey } from '@/lib/vault'
 import { requireOwnedProfessor } from '@/lib/authz'
 import { isUserSuspended, consumeAiQuota } from '@/lib/rate-limit'
 import { hasExpectedFileSignature } from '@/lib/file-validation'
+import { wouldExceedStorageLimit } from '@/lib/storage-quota'
 import { ICON_NAMES } from '@/lib/course-icon-names'
 import { serverError } from '@/lib/api-error'
 import { enqueueJob, kickJobs } from '@/lib/jobs'
@@ -28,6 +30,7 @@ async function assignCourseIcon(userId: string, courseId: string, courseName: st
         content: `Course: "${courseName}". Icons: ${iconList}. Colors: ${colorList}. Pick the best icon and color. JSON only: {"icon":"Name","color":"id"}`,
       }],
     })
+    recordUsage(userId, 'course_icon', 'claude-haiku-4-5-20251001', msg.usage) // #30
     const text = (msg.content[0] as { type: 'text'; text: string }).text
     const match = text.match(/\{[^}]+\}/)
     if (!match) return
@@ -66,6 +69,20 @@ export async function POST(request: Request) {
 
   if (!name || !professorName) {
     return NextResponse.json({ error: 'Course name and professor name are required.' }, { status: 400 })
+  }
+
+  // Syllabus limits — checked BEFORE any DB writes so an oversized/over-quota
+  // upload can't spam course rows. Mirrors inbox/upload: 25 MB per-file cap plus
+  // the per-user storage ceiling (protects the shared free-tier project) — this
+  // route previously enforced neither, allowing unbounded storage growth.
+  if (syllabus && syllabus.size > 0) {
+    const MAX_UPLOAD_BYTES = 25 * 1024 * 1024 // 25 MB
+    if (syllabus.size > MAX_UPLOAD_BYTES) {
+      return NextResponse.json({ error: 'Syllabus too large (max 25 MB).' }, { status: 413 })
+    }
+    if (await wouldExceedStorageLimit(user.id, syllabus.size)) {
+      return NextResponse.json({ error: 'Storage limit reached. Delete some materials to free up space.' }, { status: 413 })
+    }
   }
 
   const service = createServiceClient()

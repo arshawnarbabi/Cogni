@@ -330,6 +330,8 @@ function MermaidDiagram({ code }: { code: string }) {
     import('mermaid').then(({ default: mermaid }) => {
       mermaid.initialize({
         startOnLoad: false,
+        // Pin strict mode so model-generated diagram code can't inject script/click handlers
+        securityLevel: 'strict',
         theme: resolvedTheme === 'dark' ? 'dark' : 'default',
         fontFamily: 'var(--font-inter), sans-serif',
       })
@@ -731,6 +733,9 @@ export function TutorClient({ courses, sessions: initialSessions, hasApiKey = tr
   // Index into messages[] from which to start sending history to the API.
   // On essay mode switch, advances to current message count so prior turns aren't sent.
   const historyCutoffRef = useRef(0)
+  // Monotonic id per loadSession call — lets a stale fetch detect that a newer
+  // session was loaded (or a course selected) and discard its results.
+  const loadSeqRef = useRef(0)
 
   function handleAssistanceChange(v: AssistanceLevel) {
     if (v !== prevAssistanceRef.current) {
@@ -885,6 +890,7 @@ export function TutorClient({ courses, sessions: initialSessions, hasApiKey = tr
     setSessions(prev => prev.filter(s => s.session_id !== sessionId))
     // If the deleted session is currently active, return to course picker
     if (activeSessionId === sessionId) {
+      loadSeqRef.current++ // invalidate any in-flight loadSession fetch
       setActiveCourse(null)
       setActiveSessionId(null)
       setMessages([])
@@ -907,6 +913,7 @@ export function TutorClient({ courses, sessions: initialSessions, hasApiKey = tr
   }
 
   function selectCourse(course: Course) {
+    loadSeqRef.current++ // invalidate any in-flight loadSession fetch
     setActiveCourse(course)
     setActiveSessionId(null)
     setMessages([{ role: 'system', content: MODES.find(m => m.value === mode)!.description }])
@@ -917,6 +924,11 @@ export function TutorClient({ courses, sessions: initialSessions, hasApiKey = tr
     setEssay({ open: false, topic: '' })
     setEssayText('')
     setEssayHtml('')
+    setLoadingMessages(false)
+    // Fresh conversation — a cutoff carried over from a previous session would
+    // silently truncate the history sent to the API.
+    historyCutoffRef.current = 0
+    prevAssistanceRef.current = assistance
     forceNewRef.current = false
   }
 
@@ -940,6 +952,9 @@ export function TutorClient({ courses, sessions: initialSessions, hasApiKey = tr
   async function loadSession(session: Session) {
     const course = courses.find(c => c.course_id === session.course_id)
     if (!course) return
+    // Capture a fresh sequence id; if another load (or course select) starts
+    // before our fetch resolves, we bail instead of applying stale messages.
+    const seq = ++loadSeqRef.current
     setActiveCourse(course)
     setActiveSessionId(session.session_id)
     setMode(session.mode as Mode)
@@ -948,6 +963,9 @@ export function TutorClient({ courses, sessions: initialSessions, hasApiKey = tr
     setSplitContent(null)
     setSplitExpanded(false)
     setLoadingMessages(true)
+    // Reset per-session history cutoff — see selectCourse.
+    historyCutoffRef.current = 0
+    prevAssistanceRef.current = assistance
     if (session.essay_content) {
       setEssayInitialContent(session.essay_content)
       setEssayText(session.essay_content)
@@ -966,6 +984,8 @@ export function TutorClient({ courses, sessions: initialSessions, hasApiKey = tr
         const { messages: stored } = await res.json() as {
           messages: { role: string; content: string; inline_card?: InlineCard | InlineCard[] | null }[]
         }
+        // A newer session was loaded while we awaited — discard this response
+        if (seq !== loadSeqRef.current) return
         const restored = stored.map(m => {
           const base: Message = { role: m.role as Message['role'], content: m.content }
           if (m.inline_card) {
@@ -991,7 +1011,8 @@ export function TutorClient({ courses, sessions: initialSessions, hasApiKey = tr
     } catch {
       // non-critical — leave messages empty
     } finally {
-      setLoadingMessages(false)
+      // Only the most recent load may clear the skeleton
+      if (seq === loadSeqRef.current) setLoadingMessages(false)
     }
   }
 
@@ -1033,10 +1054,14 @@ export function TutorClient({ courses, sessions: initialSessions, hasApiKey = tr
       })
 
       if (!res.ok) {
-        const err = await res.json()
+        // Tolerate non-JSON error bodies (e.g. proxy HTML) — the catch below
+        // would otherwise eat the real status.
+        const err = await res.json().catch(() => ({} as { error?: string }))
         if (res.status === 429 && err.error === 'rate_limited') {
           setMessages(prev => prev.slice(0, -2))
           setInput(text)
+          // Restore attachments too — they were cleared optimistically on send
+          if (!textOverride) setAttachments(sentAttachments)
           setRateLimited(true)
           return
         }
@@ -1243,6 +1268,16 @@ export function TutorClient({ courses, sessions: initialSessions, hasApiKey = tr
           return updated
         })
       }
+    } catch {
+      // Network drop or mid-stream failure — replace the streaming placeholder
+      // with an error bubble so the spinner never spins forever, and restore
+      // the user's input so they can retry.
+      setMessages(prev => {
+        const updated = [...prev]
+        updated[updated.length - 1] = { role: 'assistant', content: 'Error: connection lost — please try again.' }
+        return updated
+      })
+      if (!textOverride) setInput(text)
     } finally {
       setSending(false)
     }
@@ -1819,6 +1854,43 @@ export function TutorClient({ courses, sessions: initialSessions, hasApiKey = tr
     </div>
   )
 
+  // Rate-limit modal — shared by both layouts so essay mode isn't left with a
+  // silently disabled send button when the daily limit is hit.
+  const rateLimitedModal = (
+    <AnimatePresence>
+      {rateLimited && (
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
+        >
+          <motion.div
+            initial={{ opacity: 0, scale: 0.95, y: 8 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.95, y: 8 }}
+            transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
+            className="mx-4 flex w-full max-w-sm flex-col gap-4 rounded-2xl border border-border bg-card p-6 shadow-xl"
+          >
+            <div className="flex flex-col gap-1.5">
+              <p className="text-sm font-semibold text-foreground">Daily limit reached</p>
+              <p className="text-xs text-muted-foreground">
+                You&apos;ve hit your daily message limit for Tutor. Your limit resets at midnight. You can adjust it in{' '}
+                <a href="/settings" className="text-primary underline-offset-2 hover:underline">Settings → AI &amp; API Keys</a>.
+              </p>
+            </div>
+            <button
+              onClick={() => setRateLimited(false)}
+              className="self-end rounded-lg bg-primary px-4 py-1.5 text-xs font-semibold text-primary-foreground"
+            >
+              Got it
+            </button>
+          </motion.div>
+        </motion.div>
+      )}
+    </AnimatePresence>
+  )
+
   // ── Active session ────────────────────────────────────────────────────────
   // Essay mode: custom animated + draggable split
   if (essay.open) {
@@ -1881,6 +1953,7 @@ export function TutorClient({ courses, sessions: initialSessions, hasApiKey = tr
             />
           )}
         </AnimatePresence>
+        {rateLimitedModal}
       </>
     )
   }
@@ -1959,38 +2032,7 @@ export function TutorClient({ courses, sessions: initialSessions, hasApiKey = tr
         />
       )}
     </AnimatePresence>
-    <AnimatePresence>
-      {rateLimited && (
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"
-        >
-          <motion.div
-            initial={{ opacity: 0, scale: 0.95, y: 8 }}
-            animate={{ opacity: 1, scale: 1, y: 0 }}
-            exit={{ opacity: 0, scale: 0.95, y: 8 }}
-            transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
-            className="mx-4 flex w-full max-w-sm flex-col gap-4 rounded-2xl border border-border bg-card p-6 shadow-xl"
-          >
-            <div className="flex flex-col gap-1.5">
-              <p className="text-sm font-semibold text-foreground">Daily limit reached</p>
-              <p className="text-xs text-muted-foreground">
-                You&apos;ve hit your daily message limit for Tutor. Your limit resets at midnight. You can adjust it in{' '}
-                <a href="/settings" className="text-primary underline-offset-2 hover:underline">Settings → AI &amp; API Keys</a>.
-              </p>
-            </div>
-            <button
-              onClick={() => setRateLimited(false)}
-              className="self-end rounded-lg bg-primary px-4 py-1.5 text-xs font-semibold text-primary-foreground"
-            >
-              Got it
-            </button>
-          </motion.div>
-        </motion.div>
-      )}
-    </AnimatePresence>
+    {rateLimitedModal}
     </>
   )
 }

@@ -82,10 +82,11 @@ export async function computeExamReadiness(
 
   return upcoming.map(exam => {
     // The exam's topics — fall back to the whole course when the syllabus
-    // didn't pin specific topics to the exam.
-    const examTopicIds = (exam.topics_covered && exam.topics_covered.length > 0
-      ? exam.topics_covered.filter(id => topicById.has(id))
-      : topicsByCourse.get(exam.course_id) ?? [])
+    // didn't pin specific topics to the exam. Filter FIRST: deleted topics
+    // leave stale IDs in topics_covered, and an all-stale list must fall back
+    // too (it used to yield weightSum=0 → a false "0% ready" alarm).
+    const pinned = (exam.topics_covered ?? []).filter(id => topicById.has(id))
+    const examTopicIds = pinned.length > 0 ? pinned : (topicsByCourse.get(exam.course_id) ?? [])
 
     let weightSum = 0
     let masterySum = 0

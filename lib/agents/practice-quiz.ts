@@ -243,8 +243,20 @@ Schema for each question:
 
   const raw = response.content[0].type === 'text' ? response.content[0].text.trim() : '[]'
   const stripped = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')
-  const parsed = JSON.parse(stripped)
-  const questions = (Array.isArray(parsed) ? parsed : []) as QuizQuestion[]
+  // Same hardened parse as generatePracticeQuiz (#32): a bare JSON.parse 500'd
+  // AFTER billing, and the {"questions": [...]} wrapper models often emit
+  // (despite the array-only instruction) read as zero questions.
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(stripped)
+  } catch {
+    throw new Error('Simulated exam generation returned invalid JSON')
+  }
+  const questions = (Array.isArray(parsed)
+    ? parsed
+    : (parsed && Array.isArray((parsed as { questions?: unknown }).questions)
+        ? (parsed as { questions: unknown[] }).questions
+        : [])) as QuizQuestion[]
   if (questions.length === 0) throw new Error('Simulated exam generation returned no questions')
 
   return { questions: questions.slice(0, questionCount), durationMinutes }

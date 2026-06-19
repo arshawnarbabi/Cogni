@@ -396,7 +396,6 @@ function hasPendingChanges(editor: Editor | null): boolean {
 
 export function applyEdit(editor: Editor, edit: SuggestedEdit) {
   const { target, replacement } = edit
-  const content = editor.getText()
 
   if (!target) {
     const end = editor.state.doc.content.size - 1
@@ -409,29 +408,39 @@ export function applyEdit(editor: Editor, edit: SuggestedEdit) {
     return
   }
 
-  const idx = content.indexOf(target)
-  if (idx === -1) return
-
-  let textOffset = 0
-  let startPos = -1
-  let endPos = -1
-
+  // Build the searchable text together with a per-character map to ProseMirror
+  // doc positions. The AI's targets come from getText(), whose '\n\n' block
+  // separator adds 2 chars per paragraph break that don't exist as doc
+  // positions — searching getText() but walking only text nodes (the old
+  // approach) shifted every match past paragraph 1 onto the wrong text.
+  let text = ''
+  const posMap: number[] = []
+  let separated = true // mirrors textBetween: only separate blocks that emitted text
   editor.state.doc.descendants((node, pos) => {
-    if (startPos !== -1 && endPos !== -1) return false
     if (node.isText && node.text) {
-      const nodeEnd = textOffset + node.text.length
-      if (startPos === -1 && idx < nodeEnd && idx >= textOffset) {
-        startPos = pos + (idx - textOffset)
-      }
-      if (startPos !== -1 && idx + target.length <= nodeEnd) {
-        endPos = pos + (idx + target.length - textOffset)
-        return false
-      }
-      textOffset += node.text.length
+      for (let i = 0; i < node.text.length; i++) posMap.push(pos + i)
+      text += node.text
+      separated = false
+    } else if (!separated && node.isBlock) {
+      // Same '\n\n' separator getText() uses; these chars have no doc position
+      text += '\n\n'
+      posMap.push(-1, -1)
+      separated = true
     }
   })
 
-  if (startPos === -1 || endPos === -1) return
+  const idx = text.indexOf(target)
+  if (idx === -1) return
+
+  const startPos = posMap[idx]
+  const lastCharPos = posMap[idx + target.length - 1]
+  // Targets that begin or end on a block separator have no position to anchor to
+  if (startPos === undefined || startPos === -1 || lastCharPos === undefined || lastCharPos === -1) return
+  const endPos = lastCharPos + 1
+
+  // Final guard: verify the mapped range really reads as the target before
+  // touching the doc — better to drop the edit than strike the wrong text.
+  if (editor.state.doc.textBetween(startPos, endPos, '\n\n') !== target) return
 
   // Insert replacement FIRST (before any marks), then mark both ranges.
   // If we set suggestedDel first, ProseMirror carries that stored mark into

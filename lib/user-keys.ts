@@ -2,7 +2,10 @@ import { createServiceClient } from '@/lib/supabase/server'
 import { createClient } from '@/lib/supabase/server'
 import { getUserSecret, setUserSecret, deleteUserSecret } from '@/lib/vault'
 
-const ALLOWED_KEYS = new Set(['openai_key'])
+// Every vault-backed per-user secret that flows through this module. Missing
+// entries fail closed (get → null, set → throw), which silently disabled the
+// whole Canvas integration when 'canvas_token' wasn't listed.
+const ALLOWED_KEYS = new Set(['openai_key', 'canvas_token'])
 
 export async function getUserKey(userId: string, keyName: string): Promise<string | null> {
   if (!ALLOWED_KEYS.has(keyName)) return null
@@ -16,7 +19,21 @@ export async function getUserKey(userId: string, keyName: string): Promise<strin
     .eq('user_id', userId)
     .eq('key_name', keyName)
     .single()
-  return data?.key_value ?? null
+  const legacy = data?.key_value ?? null
+
+  // Eager migration: a legacy plaintext row should not sit in an ordinary table
+  // (visible in DB dumps/backups) until the user happens to re-save it. Move it
+  // into the Vault on first read and drop the plaintext copy. Best-effort: on
+  // vault failure the row stays and we just return the value as before.
+  if (legacy) {
+    try {
+      await setUserSecret(userId, keyName, legacy)
+      await service.from('user_keys').delete().eq('user_id', userId).eq('key_name', keyName)
+    } catch (e) {
+      console.error('[user-keys] legacy->vault migration failed', e)
+    }
+  }
+  return legacy
 }
 
 export async function setUserKey(userId: string, keyName: string, value: string): Promise<void> {

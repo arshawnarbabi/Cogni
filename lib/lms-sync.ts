@@ -9,7 +9,7 @@ import { listCanvasCourses, getCourseGradeData, mapCanvasCourseData, CanvasAuthE
 // serialized per token (Canvas throttling guidance).
 // ─────────────────────────────────────────────────────────────────────────────
 
-export type CourseSyncStats = { course: string; gradeItems: number; assignments: number; schemeCategories: number }
+export type CourseSyncStats = { course: string; gradeItems: number; assignments: number; schemeCategories: number; errors?: string[] }
 export type SyncResult = { results: CourseSyncStats[]; skipped: string[]; tokenInvalid?: boolean }
 
 export async function importCanvasCourse(
@@ -25,13 +25,25 @@ export async function importCanvasCourse(
   const groups = await getCourseGradeData(baseUrl, token, canvasCourseId)
   const mapped = mapCanvasCourseData(groups, applyWeights, new Date().toISOString())
 
+  // A failed upsert must NOT report its rows as synced — stats count successes
+  // only, and the error is surfaced so the import route / cron can see it.
+  const errors: string[] = []
+  let schemeCount = 0
+  let gradeCount = 0
+  let assignmentCount = 0
+
   // Grading scheme: Canvas's weighted groups are authoritative when present.
   if (mapped.scheme.length > 0) {
     const { error } = await service.from('course_grade_schemes').upsert(
       mapped.scheme.map(s => ({ user_id: userId, course_id: cogniCourseId, ...s })),
       { onConflict: 'user_id,course_id,category' },
     )
-    if (error) console.error('[canvas] scheme upsert failed', error)
+    if (error) {
+      console.error('[canvas] scheme upsert failed', error)
+      errors.push(`scheme: ${error.message}`)
+    } else {
+      schemeCount = mapped.scheme.length
+    }
   }
 
   // Released grades → grade_items (exactly-once per Canvas assignment).
@@ -50,7 +62,12 @@ export async function importCanvasCourse(
       })),
       { onConflict: 'user_id,course_id,external_id' },
     )
-    if (error) console.error('[canvas] grade items upsert failed', error)
+    if (error) {
+      console.error('[canvas] grade items upsert failed', error)
+      errors.push(`grades: ${error.message}`)
+    } else {
+      gradeCount = mapped.gradeItems.length
+    }
   }
 
   // Still-to-do future assignments → planner (B12 unique index dedupes).
@@ -66,14 +83,20 @@ export async function importCanvasCourse(
       })),
       { onConflict: 'user_id,course_id,name,due_date', ignoreDuplicates: true },
     )
-    if (error) console.error('[canvas] assignments upsert failed', error)
+    if (error) {
+      console.error('[canvas] assignments upsert failed', error)
+      errors.push(`assignments: ${error.message}`)
+    } else {
+      assignmentCount = mapped.upcomingAssignments.length
+    }
   }
 
   return {
     course: courseName,
-    gradeItems: mapped.gradeItems.length,
-    assignments: mapped.upcomingAssignments.length,
-    schemeCategories: mapped.scheme.length,
+    gradeItems: gradeCount,
+    assignments: assignmentCount,
+    schemeCategories: schemeCount,
+    ...(errors.length > 0 ? { errors } : {}),
   }
 }
 

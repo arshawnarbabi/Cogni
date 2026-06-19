@@ -152,6 +152,30 @@ function buildInsight(params: {
 export async function runScheduler(userId: string): Promise<void> {
   const service = createServiceClient()
 
+  // Per-user mutex (#28): runScheduler fires from uploads, the rerun button and
+  // the daily cron with no serialization — two interleaved runs each do the
+  // calendar delete-then-create and stack every study block twice in Google
+  // Calendar. A TTL'd claim column is the serverless-safe lock: the UPDATE's
+  // WHERE clause makes claiming atomic; a 3-minute TTL self-heals crashed runs.
+  const lockCutoff = new Date(Date.now() - 3 * 60_000).toISOString()
+  const { data: lock, error: lockError } = await service
+    .from('users')
+    .update({ scheduler_lock_at: new Date().toISOString() })
+    .eq('user_id', userId)
+    .or(`scheduler_lock_at.is.null,scheduler_lock_at.lt.${lockCutoff}`)
+    .select('user_id')
+  if (lockError) console.error('[scheduler] lock claim failed', lockError)
+  else if (!lock || lock.length === 0) return // another run is in flight — its result will be fresh
+  try {
+    await runSchedulerLocked(userId)
+  } finally {
+    await service.from('users').update({ scheduler_lock_at: null }).eq('user_id', userId)
+  }
+}
+
+async function runSchedulerLocked(userId: string): Promise<void> {
+  const service = createServiceClient()
+
   const { data: userRow } = await service
     .from('users')
     .select('session_length_preference, timezone')

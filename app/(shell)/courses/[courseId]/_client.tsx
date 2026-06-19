@@ -166,8 +166,20 @@ function TopicRow({ topic, courseId, onRefresh }: { topic: Topic; courseId: stri
 
   async function handleDelete() {
     setDeleting(true)
-    await fetch(`/api/topics/${topic.topic_id}`, { method: 'DELETE' })
-    onRefresh()
+    setError(null)
+    try {
+      const res = await fetch(`/api/topics/${topic.topic_id}`, { method: 'DELETE' })
+      if (!res.ok) {
+        setError('Failed to delete')
+        return
+      }
+      onRefresh()
+    } catch {
+      setError('Failed to delete')
+    } finally {
+      // Always reset so the button never sticks on 'Deleting…'
+      setDeleting(false)
+    }
   }
 
   return (
@@ -266,13 +278,26 @@ function TestResultRow({ result }: { result: TestResult }) {
 function MaterialRow({ material, onDeleted }: { material: Material; onDeleted: () => void }) {
   const [confirming, setConfirming] = useState(false)
   const [deleting, setDeleting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
   const date = new Date(material.uploaded_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
   const tierLabel = material.tier ? (TIER_LABELS[material.tier] ?? `Tier ${material.tier}`) : 'Uncategorized'
 
   async function handleDelete() {
     setDeleting(true)
-    await fetch(`/api/materials/${material.material_id}`, { method: 'DELETE' })
-    onDeleted()
+    setError(null)
+    try {
+      const res = await fetch(`/api/materials/${material.material_id}`, { method: 'DELETE' })
+      if (!res.ok) {
+        setError('Failed to delete')
+        return
+      }
+      onDeleted()
+    } catch {
+      setError('Failed to delete')
+    } finally {
+      // Always reset so the button never sticks on 'Deleting…'
+      setDeleting(false)
+    }
   }
 
   return (
@@ -284,6 +309,7 @@ function MaterialRow({ material, onDeleted }: { material: Material; onDeleted: (
           <span className="text-xs text-muted-foreground">{tierLabel} · {date}</span>
         </div>
         <StatusChip status={material.processing_status} />
+        {error && <span className="text-[11px] text-red-500">{error}</span>}
         <button
           onClick={() => setConfirming(v => !v)}
           aria-label="Delete material"
@@ -615,16 +641,23 @@ function ArchiveModal({
   onCancel,
 }: {
   courseName: string
-  onConfirm: (keepFlashcards: boolean, keepProfessor: boolean) => void
+  onConfirm: (keepFlashcards: boolean, keepProfessor: boolean) => Promise<boolean>
   onCancel: () => void
 }) {
   const [keepFlashcards, setKeepFlashcards] = useState(true)
   const [keepProfessor, setKeepProfessor] = useState(true)
   const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   async function handleConfirm() {
     setLoading(true)
-    onConfirm(keepFlashcards, keepProfessor)
+    setError(null)
+    const ok = await onConfirm(keepFlashcards, keepProfessor)
+    // On success the parent navigates away; on failure recover the modal
+    if (!ok) {
+      setError('Archive failed — try again')
+      setLoading(false)
+    }
   }
 
   return (
@@ -691,6 +724,7 @@ function ArchiveModal({
             </div>
           </div>
 
+          {error && <span className="text-xs text-red-500">{error}</span>}
           <button
             onClick={handleConfirm}
             disabled={loading}
@@ -710,17 +744,24 @@ function DeleteModal({
   onCancel,
 }: {
   courseName: string
-  onConfirm: () => void
+  onConfirm: () => Promise<boolean>
   onCancel: () => void
 }) {
   const [typed, setTyped] = useState('')
   const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
   const confirmed = typed === courseName
 
   async function handleConfirm() {
     if (!confirmed) return
     setLoading(true)
-    onConfirm()
+    setError(null)
+    const ok = await onConfirm()
+    // On success the parent navigates away; on failure recover the modal
+    if (!ok) {
+      setError('Delete failed — try again')
+      setLoading(false)
+    }
   }
 
   return (
@@ -757,6 +798,7 @@ function DeleteModal({
               className="w-full rounded-xl border border-border bg-background px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-destructive/50"
             />
           </div>
+          {error && <span className="text-xs text-red-500">{error}</span>}
           <button
             onClick={handleConfirm}
             disabled={!confirmed || loading}
@@ -816,6 +858,7 @@ function ExamRow({ exam, courseId }: { exam: CourseExam; courseId: string }) {
   const [currentScore, setCurrentScore] = useState<number | null>(exam.student_score)
   const [value, setValue] = useState(exam.student_score != null ? String(exam.student_score) : '')
   const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   const date = new Date(exam.date + 'T12:00:00').toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
 
@@ -823,20 +866,30 @@ function ExamRow({ exam, courseId }: { exam: CourseExam; courseId: string }) {
     const score = value.trim() === '' ? null : Number(value)
     if (score !== null && (isNaN(score) || score < 0 || score > 100)) return
     setSaving(true)
-    const res = await fetch(`/api/courses/${courseId}/exams/${exam.exam_id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ student_score: score }),
-    })
-    setSaving(false)
-    if (res.ok) {
-      setCurrentScore(score)
-      setEditing(false)
+    setError(null)
+    try {
+      const res = await fetch(`/api/courses/${courseId}/exams/${exam.exam_id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ student_score: score }),
+      })
+      if (res.ok) {
+        setCurrentScore(score)
+        setEditing(false)
+      } else {
+        setError('Save failed')
+      }
+    } catch {
+      setError('Save failed')
+    } finally {
+      // Always reset so the spinner never sticks
+      setSaving(false)
     }
   }
 
   function handleCancel() {
     setEditing(false)
+    setError(null)
     setValue(currentScore != null ? String(currentScore) : '')
   }
 
@@ -854,6 +907,7 @@ function ExamRow({ exam, courseId }: { exam: CourseExam; courseId: string }) {
       </div>
       {editing ? (
         <div className="flex items-center gap-2 shrink-0">
+          {error && <span className="text-[11px] text-red-500">{error}</span>}
           <input
             type="number"
             min={0}
@@ -1074,20 +1128,34 @@ export function CourseDetailClient({
   const HeaderIcon = resolveIcon(course.icon)
   const headerPalette = resolveColor(course.icon_color)
 
-  async function handleDelete() {
-    await fetch(`/api/courses/${course.course_id}`, { method: 'DELETE' })
-    router.push('/courses')
-    router.refresh()
+  // Both return whether the call succeeded so the modal can show an error
+  // instead of navigating away on a failed delete/archive.
+  async function handleDelete(): Promise<boolean> {
+    try {
+      const res = await fetch(`/api/courses/${course.course_id}`, { method: 'DELETE' })
+      if (!res.ok) return false
+      router.push('/courses')
+      router.refresh()
+      return true
+    } catch {
+      return false
+    }
   }
 
-  async function handleArchive(keepFlashcards: boolean, keepProfessor: boolean) {
-    await fetch(`/api/courses/${course.course_id}/archive`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ keepFlashcards, keepProfessor }),
-    })
-    router.push('/courses')
-    router.refresh()
+  async function handleArchive(keepFlashcards: boolean, keepProfessor: boolean): Promise<boolean> {
+    try {
+      const res = await fetch(`/api/courses/${course.course_id}/archive`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ keepFlashcards, keepProfessor }),
+      })
+      if (!res.ok) return false
+      router.push('/courses')
+      router.refresh()
+      return true
+    } catch {
+      return false
+    }
   }
 
   const topicNames = course.topics.map(t => t.name)

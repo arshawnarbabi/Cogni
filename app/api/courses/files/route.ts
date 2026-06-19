@@ -1,5 +1,7 @@
 import { createClient } from '@/lib/supabase/server'
 import { listCourseFiles, uploadCourseFile, deleteCourseFile, getFileUrl } from '@/lib/course-files'
+import { wouldExceedStorageLimit } from '@/lib/storage-quota'
+import { readJson } from '@/lib/api-error'
 import { NextResponse } from 'next/server'
 
 export const runtime = 'nodejs'
@@ -44,6 +46,12 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'Unsupported file type.' }, { status: 400 })
   }
 
+  // Per-user storage ceiling (protects the shared free-tier project) — the 20 MB
+  // per-file cap alone allowed an unlimited NUMBER of files into the bucket.
+  if (await wouldExceedStorageLimit(user.id, file.size)) {
+    return NextResponse.json({ error: 'Storage limit reached. Delete some files to free up space.' }, { status: 413 })
+  }
+
   const bytes = Buffer.from(await file.arrayBuffer())
   const record = await uploadCourseFile(user.id, courseId, {
     name: file.name,
@@ -60,7 +68,9 @@ export async function DELETE(request: Request) {
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
-  const { fileId } = await request.json() as { fileId: string }
+  // readJson: malformed JSON is a 400, not an unhandled exception → 500.
+  const body = await readJson<{ fileId: string }>(request)
+  const fileId = body?.fileId
   if (!fileId) return NextResponse.json({ error: 'Missing fileId' }, { status: 400 })
 
   await deleteCourseFile(user.id, fileId)

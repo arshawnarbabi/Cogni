@@ -1,3 +1,4 @@
+import { recordUsage } from '@/lib/usage'
 import { createServiceClient } from '@/lib/supabase/server'
 import { readWikiFile } from '@/lib/wiki'
 import { dateKeyInTimeZone, startOfLocalDayUtc } from '@/lib/time'
@@ -398,6 +399,7 @@ export async function autoNameSession(sessionId: string, userId: string, firstEx
         content: `Generate a 2-4 word title for a study session that started with this exchange:\n\n${firstExchange.slice(0, 300)}\n\nRespond with ONLY the title, no quotes or punctuation.`,
       }],
     })
+    recordUsage(userId, 'tutor', 'claude-haiku-4-5-20251001', msg.usage) // #30: naming calls bill too
 
     const name = msg.content[0].type === 'text' ? msg.content[0].text.trim() : null
     if (name) {

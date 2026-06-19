@@ -227,11 +227,18 @@ export async function applyMasteryEvidence(
   const service = createServiceClient()
 
   const topicIds = evidences.map(e => e.topicId)
-  const { data: existingRows } = await service
+  const { data: existingRows, error: selectError } = await service
     .from('topic_mastery')
     .select('topic_id, mastery_score, confidence')
     .eq('user_id', userId)
     .in('topic_id', topicIds)
+  // A failed prior-read must ABORT: treating it as "no prior" would adopt the
+  // raw observation and silently clobber accumulated mastery (one wrong tutor
+  // answer would overwrite a 0.9 with ~0). Fatal like the upsert error below.
+  if (selectError) {
+    console.error('[mastery] prior select failed', selectError)
+    throw new Error('mastery prior select failed')
+  }
 
   const existing = new Map<string, { score: number; confidence: number }>()
   for (const row of (existingRows ?? []) as { topic_id: string; mastery_score: number | null; confidence: number | null }[]) {

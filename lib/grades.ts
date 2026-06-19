@@ -206,6 +206,16 @@ export function whatIfTargets(
     const cats = decompose(scheme, items)
     gradedContribution = cats.reduce((s, c) => s + (c.earned_pct !== null ? (c.weight_pct * c.graded_share * c.earned_pct) / 100 : 0), 0)
     remainingWeight = cats.reduce((s, c) => s + c.weight_pct * (1 - c.graded_share), 0)
+    // Normalize to a 100-point course: the solve below models
+    // final = gradedContribution + remainingWeight·x/100, which is only valid
+    // when the scheme sums to 100 — but neither the scheme editor nor the
+    // Canvas import enforces that (Canvas group weights routinely sum to <100).
+    // Treat weights as proportions of the whole instead of absolute points.
+    const totalWeight = cats.reduce((s, c) => s + c.weight_pct, 0)
+    if (totalWeight > 0 && Math.abs(totalWeight - 100) > 0.01) {
+      gradedContribution *= 100 / totalWeight
+      remainingWeight *= 100 / totalWeight
+    }
   } else {
     // POINTS mode: remaining = recorded-but-ungraded items only.
     const graded = items.filter(i => i.points_earned !== null)
